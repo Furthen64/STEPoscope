@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from ..ui.colors import color_for_category
 
 try:
@@ -13,6 +15,18 @@ try:
 except ImportError:  # pragma: no cover - allows a Qt-only install to open files
     QVTKRenderWindowInteractor = None
     vtk = None
+
+
+@dataclass(frozen=True)
+class _LabelSpec:
+    entity_id: int
+    anchor: tuple[float, float, float]
+    color: tuple[float, float, float]
+    scale: float
+    text: str
+    selected: bool
+    priority: int
+    arrival_order: int = 0
 
 
 if vtk is not None:
@@ -109,9 +123,22 @@ if vtk is not None:
 class VtkView(QWidget):
     """Render simple primitives; all STEP interpretation stays in GeometryBuilder."""
 
-    def __init__(self, parent=None, invert_mouse_rotation: bool = False):
+    # Labels are deliberately bounded: each label is a VTK actor and collision
+    # placement is performed in display space. A few hundred useful labels are
+    # much more responsive than tens of thousands of overlapping actors.
+    DEFAULT_MAX_ENTITY_LABELS = 250
+    LABEL_SPACING = 42.0
+    LABEL_GRID_SIZE = 48.0
+
+    def __init__(
+        self,
+        parent=None,
+        invert_mouse_rotation: bool = False,
+        max_entity_labels: int = DEFAULT_MAX_ENTITY_LABELS,
+    ):
         super().__init__(parent)
         self.invert_mouse_rotation = bool(invert_mouse_rotation)
+        self.max_entity_labels = self._clamp_label_limit(max_entity_labels)
         self._actors = []
         self._initialized = False
         self._last_snapshot = None
@@ -119,6 +146,10 @@ class VtkView(QWidget):
         self._last_labels = False
         self._last_label_mode = "index"
         self._last_label_texts: dict[int, str] = {}
+        self._last_label_orders: dict[int, int] = {}
+        self._last_label_time = 0
+        self._active_label_orders: dict[int, int] = {}
+        self._active_label_time = 0
         if vtk is None or QVTKRenderWindowInteractor is None:
             layout = QVBoxLayout(self)
             layout.addWidget(QLabel("VTK is not installed.\nParser and traversal remain available."))
@@ -148,7 +179,30 @@ class VtkView(QWidget):
                 self._last_labels,
                 self._last_label_mode,
                 self._last_label_texts,
+                self._last_label_orders,
+                self._last_label_time,
             )
+
+    def set_max_entity_labels(self, limit: int) -> None:
+        """Change the label actor budget used for subsequent renders."""
+
+        self.max_entity_labels = self._clamp_label_limit(limit)
+        if self.renderer is not None and self._initialized and self._last_snapshot is not None:
+            self._render_snapshot(
+                self._last_snapshot,
+                self._last_selected_id,
+                self._last_labels,
+                self._last_label_mode,
+                self._last_label_texts,
+                self._last_label_orders,
+                self._last_label_time,
+            )
+
+    @classmethod
+    def _clamp_label_limit(cls, limit: int) -> int:
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            return cls.DEFAULT_MAX_ENTITY_LABELS
+        return max(1, min(2000, limit))
 
     def set_label_mode(self, mode: str) -> None:
         self._last_label_mode = mode if mode in {"index", "type"} else "index"
@@ -159,6 +213,8 @@ class VtkView(QWidget):
                 self._last_labels,
                 self._last_label_mode,
                 self._last_label_texts,
+                self._last_label_orders,
+                self._last_label_time,
             )
 
     def showEvent(self, event):
@@ -191,6 +247,8 @@ class VtkView(QWidget):
                 self._last_labels,
                 self._last_label_mode,
                 self._last_label_texts,
+                self._last_label_orders,
+                self._last_label_time,
             )
 
     def show_snapshot(
@@ -200,6 +258,8 @@ class VtkView(QWidget):
         labels: bool = False,
         label_mode: str = "index",
         label_texts: dict[int, str] | None = None,
+        label_orders: dict[int, int] | None = None,
+        label_time: int | None = None,
     ) -> None:
         if self.renderer is None:
             return
@@ -208,16 +268,37 @@ class VtkView(QWidget):
         self._last_labels = labels
         self._last_label_mode = label_mode if label_mode in {"index", "type"} else "index"
         self._last_label_texts = label_texts or {}
+        self._last_label_orders = label_orders or {}
+        self._last_label_time = label_time if label_time is not None else 0
         if not self._initialized:
             return
-        self._render_snapshot(snapshot, selected_id, labels, self._last_label_mode, self._last_label_texts)
+        self._render_snapshot(
+            snapshot,
+            selected_id,
+            labels,
+            self._last_label_mode,
+            self._last_label_texts,
+            self._last_label_orders,
+            self._last_label_time,
+        )
 
-    def _render_snapshot(self, snapshot, selected_id: int | None, labels: bool, label_mode: str, label_texts) -> None:
+    def _render_snapshot(
+        self,
+        snapshot,
+        selected_id: int | None,
+        labels: bool,
+        label_mode: str,
+        label_texts,
+        label_orders,
+        label_time: int,
+    ) -> None:
         for actor in self._actors:
             self.renderer.RemoveActor(actor)
         self._actors.clear()
-        self._label_specs = []
-        label_scale = self._label_scale(snapshot)
+        self._label_specs: list[_LabelSpec] = []
+        self._active_label_orders = label_orders
+        self._active_label_time = label_time
+        label_scale = self._label_scale(snapshot) if labels else 1.0
         for entity_id, point in snapshot.points.items():
             self._add_point(
                 entity_id,
@@ -285,8 +366,11 @@ class VtkView(QWidget):
             return label_texts.get(entity_id, "Entity")
         return f"#{entity_id}"
 
-    def _add_label(self, entity_id, position, color, scale, text):
-        self._label_specs.append((entity_id, position, color, scale, text))
+    def _add_label(self, entity_id, position, color, scale, text, selected=False, priority=0):
+        arrival_order = self._active_label_orders.get(entity_id, self._active_label_time)
+        self._label_specs.append(
+            _LabelSpec(entity_id, position, color, scale, text, selected, priority, arrival_order)
+        )
 
     def _place_labels(self) -> None:
         """Place labels in display space and add callouts for collisions."""
@@ -296,10 +380,13 @@ class VtkView(QWidget):
             return
 
         occupied: list[tuple[float, float, float, float]] = []
-        for entity_id, anchor, color, scale, text in self._label_specs:
-            display_anchor = self._world_to_display(anchor)
-            label_width = max(30.0, 8.0 * len(text) + 8.0)
-            label_height = 22.0
+        candidates = self._visible_label_candidates(width, height)
+        for spec, display_anchor, label_width, label_height, fade in candidates:
+            entity_id = spec.entity_id
+            anchor = spec.anchor
+            color = self._fade_color(spec.color, fade)
+            scale = spec.scale
+            text = spec.text
             position, box, displaced = self._label_position(
                 display_anchor,
                 label_width,
@@ -317,17 +404,88 @@ class VtkView(QWidget):
             label.SetPickable(False)
             text_property = label.GetTextProperty()
             text_property.SetColor(*color)
+            text_property.SetOpacity(1.0 - 0.9 * fade)
             text_property.SetBold(True)
             if displaced:
                 text_property.SetBackgroundColor(0.06, 0.08, 0.11)
-                text_property.SetBackgroundOpacity(0.88)
+                text_property.SetBackgroundOpacity(0.88 * (1.0 - 0.9 * fade))
                 text_property.SetFrame(True)
                 text_property.SetFrameColor(*color)
                 text_property.SetFrameWidth(1)
             self.renderer.AddActor(label)
             self._actors.append(label)
             if displaced:
-                self._add_leader(anchor, label_position, color)
+                self._add_leader(anchor, label_position, color, 1.0 - 0.9 * fade)
+
+    def _visible_label_candidates(self, width, height):
+        """Project, prioritize, and thin labels before creating VTK actors.
+
+        The old path attempted collision placement for every rendered entity.
+        This selection pass projects each rendered entity once and limits the
+        expensive actor/collision path to the configured budget.
+        Selected entities win, followed by newer labels and then entity
+        priority. A screen-space grid prevents a dense cluster from consuming
+        the whole budget.
+        """
+
+        projected = []
+        for order, spec in enumerate(self._label_specs):
+            display_anchor = self._world_to_display(spec.anchor)
+            x, y = display_anchor[:2]
+            label_width = max(30.0, 8.0 * len(spec.text) + 8.0)
+            label_height = 22.0
+            if x < -label_width or x > width or y < -label_height or y > height:
+                continue
+            projected.append((spec, display_anchor, label_width, label_height, order))
+
+        projected.sort(key=lambda item: (not item[0].selected, -item[0].arrival_order, item[0].priority, item[4]))
+        accepted = []
+        grid: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+        spacing = self.LABEL_SPACING
+        cell_size = self.LABEL_GRID_SIZE
+        largest_accepted_radius = 0.0
+        for spec, display_anchor, label_width, label_height, _order in projected:
+            if len(accepted) >= self.max_entity_labels:
+                break
+            x, y = display_anchor[:2]
+            radius = max(spacing, label_width / 2.0, label_height / 2.0)
+            cell_x = int(x // cell_size)
+            cell_y = int(y // cell_size)
+            nearby = False
+            radius_in_cells = max(1, int((radius + largest_accepted_radius) // cell_size) + 1)
+            for neighbor_x in range(cell_x - radius_in_cells, cell_x + radius_in_cells + 1):
+                for neighbor_y in range(cell_y - radius_in_cells, cell_y + radius_in_cells + 1):
+                    for other_x, other_y, other_radius in grid.get((neighbor_x, neighbor_y), ()):
+                        required = radius + other_radius
+                        if (x - other_x) ** 2 + (y - other_y) ** 2 < required**2:
+                            nearby = True
+                            break
+                    if nearby:
+                        break
+                if nearby:
+                    break
+            if nearby:
+                continue
+            grid.setdefault((cell_x, cell_y), []).append((x, y, radius))
+            largest_accepted_radius = max(largest_accepted_radius, radius)
+            fade = 0.0 if spec.selected else self._label_fade(len(accepted))
+            accepted.append((spec, display_anchor, label_width, label_height, fade))
+        return accepted
+
+    def _label_fade(self, accepted_index: int) -> float:
+        """Fade the oldest labels as the visible label budget fills."""
+
+        fade_start = max(1, int(self.max_entity_labels * 0.72))
+        fade_end = max(fade_start + 1, self.max_entity_labels - 1)
+        return min(0.88, max(0.0, (accepted_index - fade_start) / (fade_end - fade_start)))
+
+    @staticmethod
+    def _fade_color(color, fade):
+        background = (0.10, 0.12, 0.15)
+        return tuple(
+            background_component + (component - background_component) * (1.0 - fade)
+            for component, background_component in zip(color, background)
+        )
 
     def _label_position(self, anchor, label_width, label_height, occupied, width, height):
         gap = 7.0
@@ -367,7 +525,7 @@ class VtkView(QWidget):
         divisor = world[3] or 1.0
         return tuple(component / divisor for component in world[:3])
 
-    def _add_leader(self, anchor, label_position, color):
+    def _add_leader(self, anchor, label_position, color, opacity=1.0):
         line = vtk.vtkLineSource()
         line.SetPoint1(*anchor)
         line.SetPoint2(*label_position)
@@ -376,6 +534,7 @@ class VtkView(QWidget):
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
         actor.GetProperty().SetColor(*color)
+        actor.GetProperty().SetOpacity(opacity)
         actor.GetProperty().SetLineWidth(1.0)
         actor.SetPickable(False)
         self.renderer.AddActor(actor)
@@ -397,7 +556,8 @@ class VtkView(QWidget):
         actor.GetProperty().SetColor(*color)
         self.renderer.AddActor(actor); self._actors.append(actor)
         if labels:
-            self._add_label(entity_id, (x, y, z), color, label_scale, label_text)
+            priority = 2 if category == "Topology" else 3
+            self._add_label(entity_id, (x, y, z), color, label_scale, label_text, selected, priority)
 
     def _add_polyline(self, entity_id, points, selected, category, labels, label_scale, label_text):
         vtk_points = vtk.vtkPoints()
@@ -412,7 +572,7 @@ class VtkView(QWidget):
         actor.GetProperty().SetColor(*color)
         self.renderer.AddActor(actor); self._actors.append(actor)
         if labels:
-            self._add_label(entity_id, self._center(points), color, label_scale, label_text)
+            self._add_label(entity_id, self._center(points), color, label_scale, label_text, selected, 1)
 
     def _add_mesh(self, mesh, selected, labels, label_scale, label_text):
         points = vtk.vtkPoints()
@@ -429,4 +589,4 @@ class VtkView(QWidget):
         self.renderer.AddActor(actor); self._actors.append(actor)
         if labels:
             color = (1.0, 0.4, 0.2) if selected else (0.3, 0.7, 1.0)
-            self._add_label(mesh.entity_id, self._center(mesh.points), color, label_scale, label_text)
+            self._add_label(mesh.entity_id, self._center(mesh.points), color, label_scale, label_text, selected, 0)

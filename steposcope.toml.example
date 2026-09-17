@@ -5,3 +5,6 @@ invert_mouse_rotation = true
 show_entity_labels = false
 # Label content: "index" shows #entity IDs; "type" shows Vertex, Edge, Face, etc.
 label_mode = "index"
+# Maximum number of screen-space labels kept visible at once. Selected entities
+# are always preferred; older labels fade and yield to newer labels.
+max_entity_labels = 250

@@ -84,7 +84,10 @@ class MainWindow(QMainWindow):
         self.details_tabs = QTabWidget()
         self.details_tabs.addTab(self.details, "Interpretation")
         self.details_tabs.addTab(self.raw_source, "Raw STEP")
-        self.viewport = VtkView(invert_mouse_rotation=self.invert_mouse_rotation)
+        self.viewport = VtkView(
+            invert_mouse_rotation=self.invert_mouse_rotation,
+            max_entity_labels=self.config.max_entity_labels,
+        )
         self.mode = QComboBox(); self.mode.addItems(["File order", "Semantic"])
         self.legend = QLabel()
         self.status = QLabel("Open an ISO-10303-21 STEP file to begin.")
@@ -205,7 +208,9 @@ class MainWindow(QMainWindow):
         self.show_entity_labels = enabled
         self.settings.setValue("show_entity_labels", enabled)
         self.settings.sync()
-        self.viewport.set_labels(enabled)
+        # Rebuild the current snapshot so enabling labels also refreshes the
+        # type-name lookup that is intentionally skipped while labels are off.
+        self._refresh_viewport()
 
     def _label_mode_changed(self, mode: str):
         self.label_mode = mode
@@ -214,9 +219,14 @@ class MainWindow(QMainWindow):
         self._refresh_viewport()
 
     def _label_texts(self) -> dict[int, str]:
-        if not self.document:
+        if not self.document or not self.show_entity_labels:
             return {}
         return {entity.entity_id: _label_for_entity_type(entity.type_name) for entity in self.document.entities}
+
+    def _label_orders(self) -> dict[int, int]:
+        if not self.document or not self.show_entity_labels:
+            return {}
+        return {entity.entity_id: entity.order for entity in self.document.entities}
 
     def _refresh_viewport(self):
         if not self.document or not self.document.entities:
@@ -229,6 +239,8 @@ class MainWindow(QMainWindow):
             labels=self.show_entity_labels,
             label_mode=self.label_mode,
             label_texts=self._label_texts(),
+            label_orders=self._label_orders(),
+            label_time=self.discovered_order,
         )
 
     def _load_recent_files(self) -> list[str]:
@@ -413,6 +425,8 @@ class MainWindow(QMainWindow):
             labels=self.show_entity_labels,
             label_mode=self.label_mode,
             label_texts=self._label_texts(),
+            label_orders=self._label_orders(),
+            label_time=self.discovered_order,
         )
         self.status.setText(
             f"Playback: #{entity.entity_id} {entity.type_name} · "
@@ -508,6 +522,8 @@ class MainWindow(QMainWindow):
             labels=self.show_entity_labels,
             label_mode=self.label_mode,
             label_texts=self._label_texts(),
+            label_orders=self._label_orders(),
+            label_time=self.discovered_order,
         )
         self.status.setText(f"#{entity_id} {entity.type_name} · {entity.order + 1}/{len(self.document.entities)}")
 

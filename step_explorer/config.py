@@ -15,6 +15,7 @@ class AppConfig:
     invert_mouse_rotation: bool = False
     show_entity_labels: bool = False
     label_mode: str = "index"
+    max_entity_labels: int = 250
 
 
 def default_config_paths() -> tuple[Path, ...]:
@@ -64,12 +65,18 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     invert_rotation = values.get("invert_mouse_rotation", False)
     show_labels = values.get("show_entity_labels", False)
     label_mode = values.get("label_mode", "index")
+    max_entity_labels = values.get("max_entity_labels", 250)
     if not isinstance(label_mode, str) or label_mode not in {"index", "type"}:
         label_mode = "index"
+    if isinstance(max_entity_labels, bool) or not isinstance(max_entity_labels, int):
+        max_entity_labels = 250
+    else:
+        max_entity_labels = max(1, min(2000, max_entity_labels))
     return AppConfig(
         invert_mouse_rotation=invert_rotation if isinstance(invert_rotation, bool) else False,
         show_entity_labels=show_labels if isinstance(show_labels, bool) else False,
         label_mode=label_mode,
+        max_entity_labels=max_entity_labels,
     )
 
 

@@ -43,6 +43,7 @@ To reverse the direction of mouse-driven camera rotation, create
 invert_mouse_rotation = true
 show_entity_labels = false
 label_mode = "index" # or "type"
+max_entity_labels = 250
 ```
 
 The two boolean settings default to `false`; `label_mode` defaults to
@@ -52,6 +53,11 @@ from `View > Show entity labels` or with `L`. Use `View > Label content` or
 can be toggled from `View > Invert mouse rotation`. These menu choices are
 persisted by the application and take precedence over their TOML values. Set
 `STEPOSCOPE_CONFIG` to use a different TOML file.
+
+Labels are selected in screen space and capped at `max_entity_labels` (default
+250), so enabling them remains usable for large STEP files. The selected entity
+is preferred, followed by newer labels. As the budget fills, older labels fade
+toward the viewport background and eventually drop out.
 
 After opening a STEP file, use the playback panel below the viewer to play,
 pause, step forward or backward, or scrub through the build-up. Press `Space`
