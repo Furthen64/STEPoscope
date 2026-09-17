@@ -15,11 +15,48 @@ except ImportError:  # pragma: no cover - allows a Qt-only install to open files
     vtk = None
 
 
+if vtk is not None:
+
+    class MouseRotationStyle(vtk.vtkInteractorStyleTrackballCamera):
+        """Trackball camera style with optional inverted mouse rotation."""
+
+        def __init__(self, invert_rotation: bool = False):
+            super().__init__()
+            self.set_invert_rotation(invert_rotation)
+
+        def set_invert_rotation(self, enabled: bool) -> None:
+            self.invert_rotation = bool(enabled)
+
+        def OnMouseMove(self):
+            if not self.invert_rotation or self.GetState() != vtk.VTKIS_ROTATE:
+                super().OnMouseMove()
+                return
+
+            interactor = self.GetInteractor()
+            if interactor is None:
+                super().OnMouseMove()
+                return
+
+            event_position = interactor.GetEventPosition()
+            last_event_position = interactor.GetLastEventPosition()
+            # VTK's camera style reads both positions during Rotate().
+            # Swapping them reverses the rotation delta without affecting
+            # the interactor's event history after this callback returns.
+            interactor.SetEventPosition(*last_event_position)
+            interactor.SetLastEventPosition(*event_position)
+            try:
+                super().OnMouseMove()
+            finally:
+                interactor.SetEventPosition(*event_position)
+                interactor.SetLastEventPosition(*last_event_position)
+
+
 class VtkView(QWidget):
     """Render simple primitives; all STEP interpretation stays in GeometryBuilder."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, invert_mouse_rotation: bool = False):
         super().__init__(parent)
+        self.invert_mouse_rotation = bool(invert_mouse_rotation)
         self._actors = []
         self._initialized = False
         self._last_snapshot = None
@@ -34,9 +71,16 @@ class VtkView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.widget)
+        self.interactor_style = MouseRotationStyle(self.invert_mouse_rotation)
+        self.widget.GetRenderWindow().GetInteractor().SetInteractorStyle(self.interactor_style)
         self.renderer = vtk.vtkRenderer()
         self.renderer.SetBackground(0.10, 0.12, 0.15)
         self.widget.GetRenderWindow().AddRenderer(self.renderer)
+
+    def set_invert_mouse_rotation(self, enabled: bool) -> None:
+        self.invert_mouse_rotation = bool(enabled)
+        if self.renderer is not None:
+            self.interactor_style.set_invert_rotation(self.invert_mouse_rotation)
 
     def showEvent(self, event):
         """Initialize VTK only after Qt has created and shown the native window.

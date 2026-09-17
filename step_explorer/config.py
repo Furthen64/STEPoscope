@@ -1,0 +1,66 @@
+"""Application settings loaded from an optional TOML file."""
+
+from __future__ import annotations
+
+import os
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    """Settings that affect the interactive application."""
+
+    invert_mouse_rotation: bool = False
+
+
+def default_config_paths() -> tuple[Path, ...]:
+    """Return config locations in precedence order.
+
+    A local file is convenient for a portable checkout, while the XDG path
+    gives an installed application a normal per-user config location.
+    ``STEPOSCOPE_CONFIG`` is useful when launching the application from a
+    desktop shortcut or when testing a configuration in isolation.
+    """
+
+    paths: list[Path] = []
+    configured_path = os.environ.get("STEPOSCOPE_CONFIG")
+    if configured_path:
+        paths.append(Path(configured_path).expanduser())
+    paths.append(Path.cwd() / "steposcope.toml")
+
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")).expanduser()
+    paths.append(config_home / "steposcope" / "config.toml")
+    return tuple(paths)
+
+
+def find_config_path() -> Path | None:
+    """Find the first existing config file, if any."""
+
+    return next((path for path in default_config_paths() if path.is_file()), None)
+
+
+def load_config(path: str | Path | None = None) -> AppConfig:
+    """Load settings from *path* or the first discovered config file.
+
+    Configuration is optional. A missing, unreadable, malformed, or invalid
+    file falls back to the safe defaults so a typo cannot prevent the viewer
+    from starting.
+    """
+
+    config_path = Path(path).expanduser() if path is not None else find_config_path()
+    if config_path is None:
+        return AppConfig()
+
+    try:
+        with config_path.open("rb") as config_file:
+            values = tomllib.load(config_file)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return AppConfig()
+
+    value = values.get("invert_mouse_rotation", False)
+    return AppConfig(invert_mouse_rotation=value if isinstance(value, bool) else False)
+
+
+__all__ = ["AppConfig", "default_config_paths", "find_config_path", "load_config"]

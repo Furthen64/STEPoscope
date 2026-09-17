@@ -15,6 +15,8 @@ The current first milestone provides:
 - Progressive geometry discovery with selected-entity highlighting.
 - A toolbar-driven three-pane layout with separate interpretation and raw-source tabs.
 - Persistent `File > Recent files` history containing the last five successfully opened files.
+- Optional TOML configuration for inverting camera rotation while dragging.
+- Playback controls for stepping through and animating the file-order geometry build-up.
 - A generic parser for multiline entities, nested values, strings, numbers,
   enumerations, `$`, `*`, typed values, and unknown entity types.
 
@@ -32,6 +34,24 @@ You can open a file directly with:
 ```sh
 uv run steposcope path/to/model.STEP
 ```
+
+To reverse the direction of mouse-driven camera rotation, create
+`steposcope.toml` in the working directory (or
+`~/.config/steposcope/config.toml`) with:
+
+```toml
+invert_mouse_rotation = true
+```
+
+The setting defaults to `false`. It can also be toggled at runtime from
+`View > Invert mouse rotation`; that menu choice is persisted by the
+application and takes precedence over the TOML value. Set
+`STEPOSCOPE_CONFIG` to use a different TOML file.
+
+After opening a STEP file, use the playback panel below the viewer to play,
+pause, step forward or backward, or scrub through the build-up. `Tick rate`
+controls how many STEP entities are added per second and is persisted between
+sessions.
 
 On Wayland, use the included launcher, which defaults to the XWayland-backed
 Qt platform required by the current VTK embedding:
