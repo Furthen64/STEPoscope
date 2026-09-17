@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
         self.config = config or load_config()
         self.settings = QSettings("STEPoscope", "STEPoscope")
         self.invert_mouse_rotation = self._load_invert_mouse_rotation()
+        self.show_entity_labels = self._load_show_entity_labels()
         self.playback_tick_rate = self._load_playback_tick_rate()
         self.playback_order = 0
         self.playback_timer = QTimer(self)
@@ -75,6 +76,11 @@ class MainWindow(QMainWindow):
         self.playback_tick_rate_spin.setSuffix(" steps/s")
         self.playback_tick_rate_spin.setToolTip("Number of STEP entities added per second during playback")
         self.playback_frame_label = QLabel("0 / 0")
+        self.hotkey_legend = QLabel(
+            "Hotkeys: Ctrl+O open · Ctrl+Q quit · Ctrl+Shift+G geometry only · "
+            "L labels · R reset camera · MMB orbit · Shift+MMB pan"
+        )
+        self.hotkey_legend.setToolTip("Keyboard and mouse shortcuts for the STEP viewer")
         self._build_file_menu()
         self._build_ui()
         self._connect_signals()
@@ -112,6 +118,12 @@ class MainWindow(QMainWindow):
         self.invert_mouse_rotation_action.setChecked(self.invert_mouse_rotation)
         self.invert_mouse_rotation_action.setToolTip("Reverse the direction of camera rotation while dragging")
         view_menu.addAction(self.invert_mouse_rotation_action)
+        self.show_entity_labels_action = QAction("Show entity labels", self)
+        self.show_entity_labels_action.setCheckable(True)
+        self.show_entity_labels_action.setShortcut("L")
+        self.show_entity_labels_action.setChecked(self.show_entity_labels)
+        self.show_entity_labels_action.setToolTip("Show #entity labels for rendered points, edges, and faces")
+        view_menu.addAction(self.show_entity_labels_action)
 
     def _load_invert_mouse_rotation(self) -> bool:
         if not self.settings.contains("invert_mouse_rotation"):
@@ -122,6 +134,11 @@ class MainWindow(QMainWindow):
         value = self.settings.value("playback_tick_rate", 10, type=int)
         return max(1, min(60, int(value)))
 
+    def _load_show_entity_labels(self) -> bool:
+        if not self.settings.contains("show_entity_labels"):
+            return self.config.show_entity_labels
+        return bool(self.settings.value("show_entity_labels", False, type=bool))
+
     def _playback_interval(self) -> int:
         return max(1, round(1000 / self.playback_tick_rate))
 
@@ -130,6 +147,12 @@ class MainWindow(QMainWindow):
         self.settings.setValue("invert_mouse_rotation", enabled)
         self.settings.sync()
         self.viewport.set_invert_mouse_rotation(enabled)
+
+    def _show_entity_labels_changed(self, enabled: bool):
+        self.show_entity_labels = enabled
+        self.settings.setValue("show_entity_labels", enabled)
+        self.settings.sync()
+        self.viewport.set_labels(enabled)
 
     def _load_recent_files(self) -> list[str]:
         stored = self.settings.value("recent_files", [])
@@ -184,15 +207,20 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(2, 3)
 
         playback_panel = QWidget()
-        playback_layout = QHBoxLayout(playback_panel)
+        playback_layout = QVBoxLayout(playback_panel)
         playback_layout.setContentsMargins(8, 6, 8, 6)
-        playback_layout.addWidget(self.play_button)
-        playback_layout.addWidget(self.step_backward_button)
-        playback_layout.addWidget(self.step_forward_button)
-        playback_layout.addWidget(self.playback_progress, 1)
-        playback_layout.addWidget(QLabel("Tick rate:"))
-        playback_layout.addWidget(self.playback_tick_rate_spin)
-        playback_layout.addWidget(self.playback_frame_label)
+        playback_controls = QWidget()
+        playback_controls_layout = QHBoxLayout(playback_controls)
+        playback_controls_layout.setContentsMargins(0, 0, 0, 0)
+        playback_controls_layout.addWidget(self.play_button)
+        playback_controls_layout.addWidget(self.step_backward_button)
+        playback_controls_layout.addWidget(self.step_forward_button)
+        playback_controls_layout.addWidget(self.playback_progress, 1)
+        playback_controls_layout.addWidget(QLabel("Tick rate:"))
+        playback_controls_layout.addWidget(self.playback_tick_rate_spin)
+        playback_controls_layout.addWidget(self.playback_frame_label)
+        playback_layout.addWidget(playback_controls)
+        playback_layout.addWidget(self.hotkey_legend)
 
         central_widget = QWidget()
         central_layout = QVBoxLayout(central_widget)
@@ -215,6 +243,7 @@ class MainWindow(QMainWindow):
         self.mode.currentTextChanged.connect(self._mode_changed)
         self.tree.selected_entity.connect(self.select_entity)
         self.invert_mouse_rotation_action.toggled.connect(self._invert_mouse_rotation_changed)
+        self.show_entity_labels_action.toggled.connect(self._show_entity_labels_changed)
         self.play_button.toggled.connect(self._playback_toggled)
         self.step_backward_button.clicked.connect(lambda: self.step_playback(-1))
         self.step_forward_button.clicked.connect(lambda: self.step_playback(1))
@@ -268,7 +297,11 @@ class MainWindow(QMainWindow):
         entity = self.document.entities[self.playback_order]
         self.discovered_order = self.playback_order
         builder = self.geometry_builder or GeometryBuilder(self.document)
-        self.viewport.show_snapshot(builder.build(self.playback_order), selected_id=entity.entity_id)
+        self.viewport.show_snapshot(
+            builder.build(self.playback_order),
+            selected_id=entity.entity_id,
+            labels=self.show_entity_labels,
+        )
         self.status.setText(
             f"Playback: #{entity.entity_id} {entity.type_name} · "
             f"{self.playback_order + 1}/{len(self.document.entities)}"
@@ -357,7 +390,7 @@ class MainWindow(QMainWindow):
         self.playback_progress.setValue(self.playback_order)
         self.playback_progress.blockSignals(False)
         snapshot = (self.geometry_builder or GeometryBuilder(self.document)).build(self.discovered_order)
-        self.viewport.show_snapshot(snapshot, selected_id=entity_id)
+        self.viewport.show_snapshot(snapshot, selected_id=entity_id, labels=self.show_entity_labels)
         self.status.setText(f"#{entity_id} {entity.type_name} · {entity.order + 1}/{len(self.document.entities)}")
 
     def navigate(self, delta: int):

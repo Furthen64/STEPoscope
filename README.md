@@ -41,17 +41,23 @@ To reverse the direction of mouse-driven camera rotation, create
 
 ```toml
 invert_mouse_rotation = true
+show_entity_labels = false
 ```
 
-The setting defaults to `false`. It can also be toggled at runtime from
-`View > Invert mouse rotation`; that menu choice is persisted by the
-application and takes precedence over the TOML value. Set
+Both settings default to `false`. Entity labels can be toggled at runtime
+from `View > Show entity labels` or with `L`. Mouse rotation can be toggled
+from `View > Invert mouse rotation`. Both menu choices are persisted by the
+application and take precedence over their TOML values. Set
 `STEPOSCOPE_CONFIG` to use a different TOML file.
 
 After opening a STEP file, use the playback panel below the viewer to play,
 pause, step forward or backward, or scrub through the build-up. `Tick rate`
 controls how many STEP entities are added per second and is persisted between
 sessions.
+
+Camera navigation also supports Blender-like middle-mouse orbiting; hold
+Shift while dragging with the middle mouse button to pan. Press `R` over the
+viewer to reset the framing, orbit, and roll together.
 
 On Wayland, use the included launcher, which defaults to the XWayland-backed
 Qt platform required by the current VTK embedding:

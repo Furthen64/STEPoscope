@@ -13,6 +13,7 @@ class AppConfig:
     """Settings that affect the interactive application."""
 
     invert_mouse_rotation: bool = False
+    show_entity_labels: bool = False
 
 
 def default_config_paths() -> tuple[Path, ...]:
@@ -59,8 +60,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return AppConfig()
 
-    value = values.get("invert_mouse_rotation", False)
-    return AppConfig(invert_mouse_rotation=value if isinstance(value, bool) else False)
+    invert_rotation = values.get("invert_mouse_rotation", False)
+    show_labels = values.get("show_entity_labels", False)
+    return AppConfig(
+        invert_mouse_rotation=invert_rotation if isinstance(invert_rotation, bool) else False,
+        show_entity_labels=show_labels if isinstance(show_labels, bool) else False,
+    )
 
 
 __all__ = ["AppConfig", "default_config_paths", "find_config_path", "load_config"]

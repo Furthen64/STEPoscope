@@ -1,3 +1,5 @@
 # Copy this file to steposcope.toml (or ~/.config/steposcope/config.toml).
 # Reverse the direction of camera rotation while dragging with the mouse.
 invert_mouse_rotation = true
+# Show #entity labels next to points, edges, and faces.
+show_entity_labels = false
