@@ -9,8 +9,8 @@ from .entity_details import EntityDetails
 from .entity_tree import EntityTree
 from ..visualization.vtk_view import VtkView
 
-from PySide6.QtCore import QSettings, QTimer, Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QEvent, QSettings, QTimer, Qt
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
@@ -29,6 +29,33 @@ from PySide6.QtWidgets import (
 )
 
 
+def _label_for_entity_type(type_name: str) -> str:
+    """Return a compact, useful type label for rendered STEP entities."""
+
+    name = type_name.upper()
+    if "BREP" in name or "MANIFOLD_SOLID" in name:
+        return "BREP"
+    if "NURBS" in name or "B_SPLINE" in name:
+        return "NURBS"
+    if name == "CARTESIAN_POINT":
+        return "Point"
+    if name == "VERTEX_POINT":
+        return "Vertex"
+    if name == "ORIENTED_EDGE":
+        return "Oriented Edge"
+    if name == "EDGE_CURVE" or "EDGE" in name:
+        return "Edge"
+    if "FACE" in name:
+        return "Face"
+    if "SHELL" in name:
+        return "Shell"
+    if "CURVE" in name:
+        return "Curve"
+    if "SURFACE" in name:
+        return "Surface"
+    return type_name.replace("_", " ").title()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, initial_path: str | None = None, config: AppConfig | None = None):
         super().__init__()
@@ -40,6 +67,7 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("STEPoscope", "STEPoscope")
         self.invert_mouse_rotation = self._load_invert_mouse_rotation()
         self.show_entity_labels = self._load_show_entity_labels()
+        self.label_mode = self._load_label_mode()
         self.playback_tick_rate = self._load_playback_tick_rate()
         self.playback_order = 0
         self.playback_timer = QTimer(self)
@@ -78,7 +106,8 @@ class MainWindow(QMainWindow):
         self.playback_frame_label = QLabel("0 / 0")
         self.hotkey_legend = QLabel(
             "Hotkeys: Ctrl+O open · Ctrl+Q quit · Ctrl+Shift+G geometry only · "
-            "L labels · R reset camera · MMB orbit · Shift+MMB pan"
+            "Space play/pause · L labels · T label content · R reset camera · "
+            "MMB orbit · Shift+MMB pan"
         )
         self.hotkey_legend.setToolTip("Keyboard and mouse shortcuts for the STEP viewer")
         self._build_file_menu()
@@ -91,6 +120,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("File")
         open_action = QAction("Open STEP…", self)
         open_action.setShortcut("Ctrl+O")
+        open_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         open_action.triggered.connect(self.open_dialog)
         file_menu.addAction(open_action)
         self.recent_menu = file_menu.addMenu("Recent files")
@@ -102,6 +132,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         close_action = QAction("Quit", self)
         close_action.setShortcut("Ctrl+Q")
+        close_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         close_action.triggered.connect(self.close)
         file_menu.addAction(close_action)
         self._populate_recent_menu()
@@ -110,20 +141,36 @@ class MainWindow(QMainWindow):
         self.geometry_only_action = QAction("Show only geometry", self)
         self.geometry_only_action.setCheckable(True)
         self.geometry_only_action.setShortcut("Ctrl+Shift+G")
+        self.geometry_only_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.geometry_only_action.setToolTip("Hide organizational, approval, and other non-shape entities")
         self.geometry_only_action.toggled.connect(self._geometry_filter_changed)
         view_menu.addAction(self.geometry_only_action)
         self.invert_mouse_rotation_action = QAction("Invert mouse rotation", self)
         self.invert_mouse_rotation_action.setCheckable(True)
+        self.invert_mouse_rotation_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.invert_mouse_rotation_action.setChecked(self.invert_mouse_rotation)
         self.invert_mouse_rotation_action.setToolTip("Reverse the direction of camera rotation while dragging")
         view_menu.addAction(self.invert_mouse_rotation_action)
         self.show_entity_labels_action = QAction("Show entity labels", self)
         self.show_entity_labels_action.setCheckable(True)
         self.show_entity_labels_action.setShortcut("L")
+        self.show_entity_labels_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.show_entity_labels_action.setChecked(self.show_entity_labels)
         self.show_entity_labels_action.setToolTip("Show #entity labels for rendered points, edges, and faces")
         view_menu.addAction(self.show_entity_labels_action)
+        label_content_menu = view_menu.addMenu("Label content")
+        self.label_mode_group = QActionGroup(self)
+        self.label_mode_group.setExclusive(True)
+        self.line_index_labels_action = QAction("Line index (#ID)", self)
+        self.line_index_labels_action.setCheckable(True)
+        self.type_labels_action = QAction("Entity type", self)
+        self.type_labels_action.setCheckable(True)
+        self.label_mode_group.addAction(self.line_index_labels_action)
+        self.label_mode_group.addAction(self.type_labels_action)
+        label_content_menu.addAction(self.line_index_labels_action)
+        label_content_menu.addAction(self.type_labels_action)
+        self.line_index_labels_action.setChecked(self.label_mode == "index")
+        self.type_labels_action.setChecked(self.label_mode == "type")
 
     def _load_invert_mouse_rotation(self) -> bool:
         if not self.settings.contains("invert_mouse_rotation"):
@@ -139,6 +186,12 @@ class MainWindow(QMainWindow):
             return self.config.show_entity_labels
         return bool(self.settings.value("show_entity_labels", False, type=bool))
 
+    def _load_label_mode(self) -> str:
+        if not self.settings.contains("label_mode"):
+            return self.config.label_mode
+        value = str(self.settings.value("label_mode", "index"))
+        return value if value in {"index", "type"} else "index"
+
     def _playback_interval(self) -> int:
         return max(1, round(1000 / self.playback_tick_rate))
 
@@ -153,6 +206,30 @@ class MainWindow(QMainWindow):
         self.settings.setValue("show_entity_labels", enabled)
         self.settings.sync()
         self.viewport.set_labels(enabled)
+
+    def _label_mode_changed(self, mode: str):
+        self.label_mode = mode
+        self.settings.setValue("label_mode", mode)
+        self.settings.sync()
+        self._refresh_viewport()
+
+    def _label_texts(self) -> dict[int, str]:
+        if not self.document:
+            return {}
+        return {entity.entity_id: _label_for_entity_type(entity.type_name) for entity in self.document.entities}
+
+    def _refresh_viewport(self):
+        if not self.document or not self.document.entities:
+            return
+        builder = self.geometry_builder or GeometryBuilder(self.document)
+        snapshot = builder.build(self.discovered_order)
+        self.viewport.show_snapshot(
+            snapshot,
+            selected_id=self.current_id,
+            labels=self.show_entity_labels,
+            label_mode=self.label_mode,
+            label_texts=self._label_texts(),
+        )
 
     def _load_recent_files(self) -> list[str]:
         stored = self.settings.value("recent_files", [])
@@ -244,12 +321,45 @@ class MainWindow(QMainWindow):
         self.tree.selected_entity.connect(self.select_entity)
         self.invert_mouse_rotation_action.toggled.connect(self._invert_mouse_rotation_changed)
         self.show_entity_labels_action.toggled.connect(self._show_entity_labels_changed)
+        self.line_index_labels_action.triggered.connect(lambda: self._label_mode_changed("index"))
+        self.type_labels_action.triggered.connect(lambda: self._label_mode_changed("type"))
         self.play_button.toggled.connect(self._playback_toggled)
         self.step_backward_button.clicked.connect(lambda: self.step_playback(-1))
         self.step_forward_button.clicked.connect(lambda: self.step_playback(1))
         self.playback_progress.valueChanged.connect(self._playback_frame_changed)
         self.playback_tick_rate_spin.valueChanged.connect(self._playback_tick_rate_changed)
         self._update_playback_controls()
+
+        # QVTKRenderWindowInteractor consumes key events for its own camera
+        # controls, so bridge the application hotkeys at the Qt widget level.
+        self.viewport.installEventFilter(self)
+        vtk_widget = getattr(self.viewport, "widget", None)
+        if vtk_widget is not None:
+            vtk_widget.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        viewport_widget = getattr(self.viewport, "widget", None)
+        if watched in {self.viewport, viewport_widget} and event.type() == QEvent.Type.KeyPress:
+            if event.isAutoRepeat() or event.modifiers() & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.AltModifier
+                | Qt.KeyboardModifier.MetaModifier
+            ):
+                return super().eventFilter(watched, event)
+            if event.key() == Qt.Key.Key_Space:
+                self.play_button.setChecked(not self.play_button.isChecked())
+                event.accept()
+                return True
+            if event.key() == Qt.Key.Key_L:
+                self.show_entity_labels_action.trigger()
+                event.accept()
+                return True
+            if event.key() == Qt.Key.Key_T:
+                action = self.line_index_labels_action if self.label_mode == "type" else self.type_labels_action
+                action.trigger()
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
     def _update_playback_controls(self):
         has_entities = bool(self.document and self.document.entities)
@@ -301,6 +411,8 @@ class MainWindow(QMainWindow):
             builder.build(self.playback_order),
             selected_id=entity.entity_id,
             labels=self.show_entity_labels,
+            label_mode=self.label_mode,
+            label_texts=self._label_texts(),
         )
         self.status.setText(
             f"Playback: #{entity.entity_id} {entity.type_name} · "
@@ -390,7 +502,13 @@ class MainWindow(QMainWindow):
         self.playback_progress.setValue(self.playback_order)
         self.playback_progress.blockSignals(False)
         snapshot = (self.geometry_builder or GeometryBuilder(self.document)).build(self.discovered_order)
-        self.viewport.show_snapshot(snapshot, selected_id=entity_id, labels=self.show_entity_labels)
+        self.viewport.show_snapshot(
+            snapshot,
+            selected_id=entity_id,
+            labels=self.show_entity_labels,
+            label_mode=self.label_mode,
+            label_texts=self._label_texts(),
+        )
         self.status.setText(f"#{entity_id} {entity.type_name} · {entity.order + 1}/{len(self.document.entities)}")
 
     def navigate(self, delta: int):

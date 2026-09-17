@@ -117,6 +117,8 @@ class VtkView(QWidget):
         self._last_snapshot = None
         self._last_selected_id = None
         self._last_labels = False
+        self._last_label_mode = "index"
+        self._last_label_texts: dict[int, str] = {}
         if vtk is None or QVTKRenderWindowInteractor is None:
             layout = QVBoxLayout(self)
             layout.addWidget(QLabel("VTK is not installed.\nParser and traversal remain available."))
@@ -140,7 +142,24 @@ class VtkView(QWidget):
     def set_labels(self, enabled: bool) -> None:
         self._last_labels = bool(enabled)
         if self.renderer is not None and self._initialized and self._last_snapshot is not None:
-            self._render_snapshot(self._last_snapshot, self._last_selected_id, self._last_labels)
+            self._render_snapshot(
+                self._last_snapshot,
+                self._last_selected_id,
+                self._last_labels,
+                self._last_label_mode,
+                self._last_label_texts,
+            )
+
+    def set_label_mode(self, mode: str) -> None:
+        self._last_label_mode = mode if mode in {"index", "type"} else "index"
+        if self.renderer is not None and self._initialized and self._last_snapshot is not None:
+            self._render_snapshot(
+                self._last_snapshot,
+                self._last_selected_id,
+                self._last_labels,
+                self._last_label_mode,
+                self._last_label_texts,
+            )
 
     def showEvent(self, event):
         """Initialize VTK only after Qt has created and shown the native window.
@@ -166,27 +185,63 @@ class VtkView(QWidget):
         self.widget.Initialize()
         self._initialized = True
         if self._last_snapshot is not None:
-            self._render_snapshot(self._last_snapshot, self._last_selected_id, self._last_labels)
+            self._render_snapshot(
+                self._last_snapshot,
+                self._last_selected_id,
+                self._last_labels,
+                self._last_label_mode,
+                self._last_label_texts,
+            )
 
-    def show_snapshot(self, snapshot, selected_id: int | None = None, labels: bool = False) -> None:
+    def show_snapshot(
+        self,
+        snapshot,
+        selected_id: int | None = None,
+        labels: bool = False,
+        label_mode: str = "index",
+        label_texts: dict[int, str] | None = None,
+    ) -> None:
         if self.renderer is None:
             return
         self._last_snapshot = snapshot
         self._last_selected_id = selected_id
         self._last_labels = labels
+        self._last_label_mode = label_mode if label_mode in {"index", "type"} else "index"
+        self._last_label_texts = label_texts or {}
         if not self._initialized:
             return
-        self._render_snapshot(snapshot, selected_id, labels)
+        self._render_snapshot(snapshot, selected_id, labels, self._last_label_mode, self._last_label_texts)
 
-    def _render_snapshot(self, snapshot, selected_id: int | None, labels: bool) -> None:
+    def _render_snapshot(self, snapshot, selected_id: int | None, labels: bool, label_mode: str, label_texts) -> None:
         for actor in self._actors:
             self.renderer.RemoveActor(actor)
         self._actors.clear()
+        self._label_specs = []
         label_scale = self._label_scale(snapshot)
         for entity_id, point in snapshot.points.items():
-            self._add_point(entity_id, point.x, point.y, point.z, selected_id == entity_id, "Geometry", labels, label_scale)
+            self._add_point(
+                entity_id,
+                point.x,
+                point.y,
+                point.z,
+                selected_id == entity_id,
+                "Geometry",
+                labels,
+                label_scale,
+                self._label_text(entity_id, label_mode, label_texts),
+            )
         for entity_id, point in snapshot.vertices.items():
-            self._add_point(entity_id, point.x, point.y, point.z, selected_id == entity_id, "Topology", labels, label_scale)
+            self._add_point(
+                entity_id,
+                point.x,
+                point.y,
+                point.z,
+                selected_id == entity_id,
+                "Topology",
+                labels,
+                label_scale,
+                self._label_text(entity_id, label_mode, label_texts),
+            )
         for polyline in snapshot.polylines:
             category = "Geometry" if polyline.category == "edge" else "Structure"
             self._add_polyline(
@@ -196,10 +251,19 @@ class VtkView(QWidget):
                 category,
                 labels,
                 label_scale,
+                self._label_text(polyline.entity_id, label_mode, label_texts),
             )
         for face in snapshot.faces:
-            self._add_mesh(face, selected_id == face.entity_id, labels, label_scale)
+            self._add_mesh(
+                face,
+                selected_id == face.entity_id,
+                labels,
+                label_scale,
+                self._label_text(face.entity_id, label_mode, label_texts),
+            )
         self.renderer.ResetCamera()
+        if labels:
+            self._place_labels()
         self.widget.GetRenderWindow().Render()
 
     def _label_scale(self, snapshot) -> float:
@@ -215,16 +279,107 @@ class VtkView(QWidget):
         )
         return max(span * 0.03, 1e-9)
 
-    def _add_label(self, entity_id, position, color, scale):
-        label = vtk.vtkBillboardTextActor3D()
-        label.SetInput(f"#{entity_id}")
-        label.SetPosition(*position)
-        label.SetScale(scale, scale, scale)
-        label.SetPickable(False)
-        label.GetTextProperty().SetColor(*color)
-        label.GetTextProperty().SetBold(True)
-        self.renderer.AddActor(label)
-        self._actors.append(label)
+    @staticmethod
+    def _label_text(entity_id, label_mode, label_texts):
+        if label_mode == "type":
+            return label_texts.get(entity_id, "Entity")
+        return f"#{entity_id}"
+
+    def _add_label(self, entity_id, position, color, scale, text):
+        self._label_specs.append((entity_id, position, color, scale, text))
+
+    def _place_labels(self) -> None:
+        """Place labels in display space and add callouts for collisions."""
+
+        width, height = self.widget.GetRenderWindow().GetSize()
+        if width <= 0 or height <= 0:
+            return
+
+        occupied: list[tuple[float, float, float, float]] = []
+        for entity_id, anchor, color, scale, text in self._label_specs:
+            display_anchor = self._world_to_display(anchor)
+            label_width = max(30.0, 8.0 * len(text) + 8.0)
+            label_height = 22.0
+            position, box, displaced = self._label_position(
+                display_anchor,
+                label_width,
+                label_height,
+                occupied,
+                width,
+                height,
+            )
+            occupied.append(box)
+            label_position = self._display_to_world(position[0], position[1], display_anchor[2])
+            label = vtk.vtkBillboardTextActor3D()
+            label.SetInput(text)
+            label.SetPosition(*label_position)
+            label.SetScale(scale, scale, scale)
+            label.SetPickable(False)
+            text_property = label.GetTextProperty()
+            text_property.SetColor(*color)
+            text_property.SetBold(True)
+            if displaced:
+                text_property.SetBackgroundColor(0.06, 0.08, 0.11)
+                text_property.SetBackgroundOpacity(0.88)
+                text_property.SetFrame(True)
+                text_property.SetFrameColor(*color)
+                text_property.SetFrameWidth(1)
+            self.renderer.AddActor(label)
+            self._actors.append(label)
+            if displaced:
+                self._add_leader(anchor, label_position, color)
+
+    def _label_position(self, anchor, label_width, label_height, occupied, width, height):
+        gap = 7.0
+        initial = (min(anchor[0] + gap, width - label_width), min(anchor[1] + gap, height - label_height))
+        candidates = [initial]
+        for radius in range(1, 8):
+            distance = radius * (max(label_width, label_height) + gap)
+            candidates.extend(
+                (
+                    anchor[0] + dx * distance,
+                    anchor[1] + dy * distance,
+                )
+                for dx, dy in ((1, 1), (1, -1), (-1, 1), (-1, -1), (0, 1), (0, -1), (1, 0), (-1, 0))
+            )
+        for x, y in candidates:
+            x = max(2.0, min(x, width - label_width - 2.0))
+            y = max(2.0, min(y, height - label_height - 2.0))
+            box = (x, y, x + label_width, y + label_height)
+            if not any(self._boxes_overlap(box, other) for other in occupied):
+                return (x, y), box, (x, y) != initial
+        x, y = initial
+        return (x, y), (x, y, x + label_width, y + label_height), True
+
+    @staticmethod
+    def _boxes_overlap(first, second) -> bool:
+        return first[0] < second[2] and first[2] > second[0] and first[1] < second[3] and first[3] > second[1]
+
+    def _world_to_display(self, position):
+        self.renderer.SetWorldPoint(*position, 1.0)
+        self.renderer.WorldToDisplay()
+        return self.renderer.GetDisplayPoint()
+
+    def _display_to_world(self, x, y, z):
+        self.renderer.SetDisplayPoint(x, y, z)
+        self.renderer.DisplayToWorld()
+        world = self.renderer.GetWorldPoint()
+        divisor = world[3] or 1.0
+        return tuple(component / divisor for component in world[:3])
+
+    def _add_leader(self, anchor, label_position, color):
+        line = vtk.vtkLineSource()
+        line.SetPoint1(*anchor)
+        line.SetPoint2(*label_position)
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(line.GetOutputPort())
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(*color)
+        actor.GetProperty().SetLineWidth(1.0)
+        actor.SetPickable(False)
+        self.renderer.AddActor(actor)
+        self._actors.append(actor)
 
     def _center(self, points):
         return tuple(
@@ -232,7 +387,7 @@ class VtkView(QWidget):
             for axis in ("x", "y", "z")
         )
 
-    def _add_point(self, entity_id, x, y, z, selected, category, labels, label_scale):
+    def _add_point(self, entity_id, x, y, z, selected, category, labels, label_scale, label_text):
         points = vtk.vtkPoints(); points.InsertNextPoint(x, y, z)
         cells = vtk.vtkCellArray(); cells.InsertNextCell(1); cells.InsertCellPoint(0)
         data = vtk.vtkPolyData(); data.SetPoints(points); data.SetVerts(cells)
@@ -242,9 +397,9 @@ class VtkView(QWidget):
         actor.GetProperty().SetColor(*color)
         self.renderer.AddActor(actor); self._actors.append(actor)
         if labels:
-            self._add_label(entity_id, (x, y, z), color, label_scale)
+            self._add_label(entity_id, (x, y, z), color, label_scale, label_text)
 
-    def _add_polyline(self, entity_id, points, selected, category, labels, label_scale):
+    def _add_polyline(self, entity_id, points, selected, category, labels, label_scale, label_text):
         vtk_points = vtk.vtkPoints()
         for point in points: vtk_points.InsertNextPoint(point.x, point.y, point.z)
         line = vtk.vtkPolyLine(); line.GetPointIds().SetNumberOfIds(len(points))
@@ -257,9 +412,9 @@ class VtkView(QWidget):
         actor.GetProperty().SetColor(*color)
         self.renderer.AddActor(actor); self._actors.append(actor)
         if labels:
-            self._add_label(entity_id, self._center(points), color, label_scale)
+            self._add_label(entity_id, self._center(points), color, label_scale, label_text)
 
-    def _add_mesh(self, mesh, selected, labels, label_scale):
+    def _add_mesh(self, mesh, selected, labels, label_scale, label_text):
         points = vtk.vtkPoints()
         for point in mesh.points: points.InsertNextPoint(point.x, point.y, point.z)
         triangles = vtk.vtkCellArray()
@@ -274,4 +429,4 @@ class VtkView(QWidget):
         self.renderer.AddActor(actor); self._actors.append(actor)
         if labels:
             color = (1.0, 0.4, 0.2) if selected else (0.3, 0.7, 1.0)
-            self._add_label(mesh.entity_id, self._center(mesh.points), color, label_scale)
+            self._add_label(mesh.entity_id, self._center(mesh.points), color, label_scale, label_text)

@@ -4,11 +4,15 @@ from step_explorer.config import AppConfig, load_config
 def test_mouse_rotation_setting_is_loaded_from_toml(tmp_path):
     config_path = tmp_path / "steposcope.toml"
     config_path.write_text(
-        "invert_mouse_rotation = true\nshow_entity_labels = true\n",
+        "invert_mouse_rotation = true\nshow_entity_labels = true\nlabel_mode = \"type\"\n",
         encoding="utf-8",
     )
 
-    assert load_config(config_path) == AppConfig(invert_mouse_rotation=True, show_entity_labels=True)
+    assert load_config(config_path) == AppConfig(
+        invert_mouse_rotation=True,
+        show_entity_labels=True,
+        label_mode="type",
+    )
 
 
 def test_missing_and_invalid_config_use_defaults(tmp_path):

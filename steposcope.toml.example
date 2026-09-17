@@ -3,3 +3,5 @@
 invert_mouse_rotation = true
 # Show #entity labels next to points, edges, and faces.
 show_entity_labels = false
+# Label content: "index" shows #entity IDs; "type" shows Vertex, Edge, Face, etc.
+label_mode = "index"

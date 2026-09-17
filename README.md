@@ -42,18 +42,21 @@ To reverse the direction of mouse-driven camera rotation, create
 ```toml
 invert_mouse_rotation = true
 show_entity_labels = false
+label_mode = "index" # or "type"
 ```
 
-Both settings default to `false`. Entity labels can be toggled at runtime
-from `View > Show entity labels` or with `L`. Mouse rotation can be toggled
-from `View > Invert mouse rotation`. Both menu choices are persisted by the
-application and take precedence over their TOML values. Set
+The two boolean settings default to `false`; `label_mode` defaults to
+`"index"`. Entity labels can be toggled at runtime
+from `View > Show entity labels` or with `L`. Use `View > Label content` or
+`T` to switch between line indices and friendly entity types. Mouse rotation
+can be toggled from `View > Invert mouse rotation`. These menu choices are
+persisted by the application and take precedence over their TOML values. Set
 `STEPOSCOPE_CONFIG` to use a different TOML file.
 
 After opening a STEP file, use the playback panel below the viewer to play,
-pause, step forward or backward, or scrub through the build-up. `Tick rate`
-controls how many STEP entities are added per second and is persisted between
-sessions.
+pause, step forward or backward, or scrub through the build-up. Press `Space`
+over the OpenGL viewer to play/pause. `Tick rate` controls how many STEP
+entities are added per second and is persisted between sessions.
 
 Camera navigation also supports Blender-like middle-mouse orbiting; hold
 Shift while dragging with the middle mouse button to pan. Press `R` over the
