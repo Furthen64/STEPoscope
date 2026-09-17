@@ -122,10 +122,20 @@ class GeometryBuilder:
                 edge = visible.get(edge_refs[-1] if edge_refs else -1)
                 if edge:
                     points = self._edge_points(edge, snapshot)
-                    if points:
-                        if not polygon or polygon[-1] != points[0]:
-                            polygon.append(points[0])
-                        polygon.append(points[-1])
+                    same_sense = next((item for item in oriented.arguments if isinstance(item, StepEnumeration)), None)
+                    if same_sense and same_sense.value.upper() == "F":
+                        points = tuple(reversed(points))
+                    if len(points) != 2:
+                        continue
+                    if not polygon:
+                        polygon.extend(points)
+                    elif polygon[-1] == points[0]:
+                        polygon.append(points[1])
+                    elif polygon[-1] == points[1]:
+                        # Some exporters store the edge direction opposite to
+                        # the loop order. Reverse it instead of introducing a
+                        # disconnected/self-crossing fan polygon.
+                        polygon.append(points[0])
             break
         if len(polygon) >= 3 and polygon[0] == polygon[-1]:
             polygon.pop()
