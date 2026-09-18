@@ -585,10 +585,19 @@ class VtkView(QWidget):
         data = vtk.vtkPolyData(); data.SetPoints(points); data.SetPolys(triangles)
         mapper = vtk.vtkPolyDataMapper(); mapper.SetInputData(data)
         actor = vtk.vtkActor(); actor.SetMapper(mapper); actor.GetProperty().SetOpacity(0.35); actor.GetProperty().SetColor(0.3, 0.7, 1.0)
-        # The educational face preview is triangulated with a fan. Lighting
-        # can give those triangles different normals and create an unwanted
-        # diagonal color split, so keep the assigned face color uniform.
-        actor.GetProperty().LightingOff()
+        if mesh.curved:
+            # Shared vertices plus Phong interpolation make sampled analytic
+            # surfaces read as smooth rather than as a row of flat facets.
+            normals = vtk.vtkPolyDataNormals()
+            normals.SetInputData(data)
+            normals.SplittingOff()
+            normals.ConsistencyOn()
+            mapper.SetInputConnection(normals.GetOutputPort())
+            actor.GetProperty().SetInterpolationToPhong()
+        else:
+            # Planar previews are triangulated with a fan. Lighting can give
+            # those triangles different normals and create a diagonal split.
+            actor.GetProperty().LightingOff()
         if selected: actor.GetProperty().SetColor(1.0, 0.4, 0.2); actor.GetProperty().SetOpacity(0.55)
         self.renderer.AddActor(actor); self._actors.append(actor)
         if labels:

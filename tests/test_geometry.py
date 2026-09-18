@@ -44,3 +44,37 @@ def test_face_loop_respects_oriented_edge_sense():
         Point3(1.0, 1.0, 0.0),
         Point3(0.0, 1.0, 0.0),
     )
+
+
+def test_circle_edge_is_sampled_as_an_arc():
+    source = """ISO-10303-21;DATA;
+    #1=CARTESIAN_POINT('',(0.,0.,0.));
+    #2=DIRECTION('',(0.,0.,1.));
+    #3=DIRECTION('',(1.,0.,0.));
+    #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+    #5=CIRCLE('',#4,1.);
+    #6=CARTESIAN_POINT('',(1.,0.,0.));
+    #7=CARTESIAN_POINT('',(-1.,0.,0.));
+    #8=VERTEX_POINT('',#6);
+    #9=VERTEX_POINT('',#7);
+    #10=EDGE_CURVE('',#8,#9,#5,.T.);
+    ENDSEC;END-ISO-10303-21;"""
+
+    edge = GeometryBuilder(parse_step(source)).build().polylines[0]
+
+    assert len(edge.points) == 19
+    assert edge.points[0] == Point3(1.0, 0.0, 0.0)
+    assert edge.points[-1] == Point3(-1.0, 0.0, 0.0)
+    assert max(point.y for point in edge.points) == 1.0
+
+
+def test_slot_fixture_builds_curved_edges_and_cylindrical_strips():
+    from pathlib import Path
+
+    snapshot = GeometryBuilder(parse_step(Path("examples/stepAP203/slot1.STEP").read_text())).build()
+
+    curved_edges = [edge for edge in snapshot.polylines if len(edge.points) > 2]
+    cylindrical_faces = [face for face in snapshot.faces if face.triangles[0][2] > 2]
+    assert len(curved_edges) == 12  # Four EDGE_CURVEs and their loop occurrences.
+    assert len(cylindrical_faces) == 2
+    assert all(len(face.triangles) == 36 for face in cylindrical_faces)
