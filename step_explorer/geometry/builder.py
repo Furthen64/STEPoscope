@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 import math
 
+import vtkmodules.all as vtk
+
 from ..step.parser import StepDocument, StepEntity
 from ..step.values import StepAggregate, StepEnumeration, StepNumber, StepReference, StepTypedValue, StepValue
 
@@ -99,6 +101,13 @@ class GeometryBuilder:
         points = tuple(snapshot.point_for(item) for item in refs if item is not None and snapshot.point_for(item) is not None)
         curve_id = next((_ref(item) for item in entity.arguments[3:4]), None)
         curve = self.document.entity(curve_id or -1)
+        # Open CASCADE/FreeCAD commonly wraps the actual 3-D curve in a
+        # SURFACE_CURVE (or SEAM_CURVE), followed by its p-curves.  The first
+        # reference is the curve in model space; sampling the 2-D p-curves (or
+        # ignoring the wrapper) reduces every circular edge to a chord.
+        if curve and curve.type_name.upper() in {"SURFACE_CURVE", "SEAM_CURVE"}:
+            model_curve_id = next((_ref(item) for item in curve.arguments if _ref(item) is not None), None)
+            curve = self.document.entity(model_curve_id or -1)
         if len(points) == 2 and curve and curve.type_name.upper() == "CIRCLE":
             same_sense = next(
                 (item for item in reversed(entity.arguments) if isinstance(item, StepEnumeration)), None
@@ -203,8 +212,8 @@ class GeometryBuilder:
         bound_ids: list[int] = []
         for argument in entity.arguments:
             bound_ids.extend(item.entity_id for item in _aggregate(argument) if isinstance(item, StepReference))
-        polygon: list[Point3] = []
-        segments: list[tuple[Point3, ...]] = []
+        loops: list[list[Point3]] = []
+        loop_segments: list[list[tuple[Point3, ...]]] = []
         for bound_id in bound_ids:
             bound = visible.get(bound_id)
             if not bound or bound.type_name.upper() not in {"FACE_OUTER_BOUND", "FACE_BOUND"}:
@@ -214,6 +223,8 @@ class GeometryBuilder:
             if not loop or loop.type_name.upper() != "EDGE_LOOP":
                 continue
             loop_items = next((_aggregate(argument) for argument in loop.arguments if isinstance(argument, StepAggregate)), ())
+            polygon: list[Point3] = []
+            segments: list[tuple[Point3, ...]] = []
             for oriented_id in (_ref(item) for item in loop_items):
                 oriented = visible.get(oriented_id or -1)
                 if not oriented:
@@ -239,15 +250,17 @@ class GeometryBuilder:
                         reversed_points = tuple(reversed(points))
                         segments[-1] = reversed_points
                         polygon.extend(reversed_points[1:])
-            break
-        if len(polygon) >= 3 and polygon[0] == polygon[-1]:
-            polygon.pop()
-        if len(polygon) < 3:
+            if len(polygon) >= 3 and polygon[0] == polygon[-1]:
+                polygon.pop()
+            if len(polygon) >= 3:
+                loops.append(polygon)
+                loop_segments.append(segments)
+        if not loops:
             return None
         surface_id = next((_ref(item) for item in entity.arguments if _ref(item) is not None), None)
         surface = visible.get(surface_id or -1)
-        curved = [segment for segment in segments if len(segment) > 2]
-        if surface and surface.type_name.upper() == "CYLINDRICAL_SURFACE" and len(curved) == 2:
+        curved = [segment for segment in loop_segments[0] if len(segment) > 2]
+        if len(loops) == 1 and surface and surface.type_name.upper() == "CYLINDRICAL_SURFACE" and len(curved) == 2:
             first, second = curved
             if len(first) == len(second):
                 # A bounded cylindrical patch is a ruled strip between its two
@@ -261,9 +274,54 @@ class GeometryBuilder:
                 for index in range(len(first) - 1):
                     triangles.extend(((index, index + 1, offset + index + 1), (index, offset + index + 1, offset + index)))
                 return Mesh(entity.entity_id, points, tuple(triangles), curved=True)
-        # A fan is intentionally modest: this is an educational preview and the
-        # boundary wire remains authoritative when a polygon is not planar.
+        triangulated = self._triangulate_loops(loops)
+        if triangulated:
+            points, triangles = triangulated
+            return Mesh(entity.entity_id, points, triangles)
+        # Preserve the old dependency-free fallback for unusual non-planar
+        # faces. The boundary wire remains authoritative in that case.
+        polygon = max(loops, key=len)
         return Mesh(entity.entity_id, tuple(polygon), tuple((0, index, index + 1) for index in range(1, len(polygon) - 1)))
+
+    @staticmethod
+    def _triangulate_loops(loops: list[list[Point3]]) -> tuple[tuple[Point3, ...], tuple[tuple[int, int, int], ...]] | None:
+        """Triangulate coplanar boundary loops, including inner holes.
+
+        STEP does not require exporters to list the outer bound first (FreeCAD
+        lists both circular holes before it in some files). VTK's contour
+        triangulator classifies the closed contours geometrically, avoiding
+        both that ordering assumption and the concave fan artifacts.
+        """
+        points = tuple(point for loop in loops for point in loop)
+        vtk_points = vtk.vtkPoints()
+        for point in points:
+            vtk_points.InsertNextPoint(point.x, point.y, point.z)
+        lines = vtk.vtkCellArray()
+        offset = 0
+        for loop in loops:
+            polyline = vtk.vtkPolyLine()
+            polyline.GetPointIds().SetNumberOfIds(len(loop) + 1)
+            for index in range(len(loop)):
+                polyline.GetPointIds().SetId(index, offset + index)
+            polyline.GetPointIds().SetId(len(loop), offset)
+            lines.InsertNextCell(polyline)
+            offset += len(loop)
+        data = vtk.vtkPolyData()
+        data.SetPoints(vtk_points)
+        data.SetLines(lines)
+        triangulator = vtk.vtkContourTriangulator()
+        triangulator.SetInputData(data)
+        triangles_filter = vtk.vtkTriangleFilter()
+        triangles_filter.SetInputConnection(triangulator.GetOutputPort())
+        triangles_filter.Update()
+        output = triangles_filter.GetOutput()
+        triangles: list[tuple[int, int, int]] = []
+        ids = vtk.vtkIdList()
+        output.GetPolys().InitTraversal()
+        while output.GetPolys().GetNextCell(ids):
+            if ids.GetNumberOfIds() == 3:
+                triangles.append(tuple(ids.GetId(index) for index in range(3)))
+        return (points, tuple(triangles)) if triangles else None
 
     @staticmethod
     def _distance(first: Point3, second: Point3) -> float:
