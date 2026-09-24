@@ -88,7 +88,7 @@ class MainWindow(QMainWindow):
             invert_mouse_rotation=self.invert_mouse_rotation,
             max_entity_labels=self.config.max_entity_labels,
         )
-        self.mode = QComboBox(); self.mode.addItems(["File order", "Semantic"])
+        self.mode = QComboBox(); self.mode.addItems(["File order", "Semantic", "Playback"])
         self.legend = QLabel()
         self.status = QLabel("Open an ISO-10303-21 STEP file to begin.")
         self.previous_button = QPushButton("Previous")
@@ -330,7 +330,7 @@ class MainWindow(QMainWindow):
         self.previous_button.clicked.connect(lambda: self.navigate(-1))
         self.next_button.clicked.connect(lambda: self.navigate(1))
         self.mode.currentTextChanged.connect(self._mode_changed)
-        self.tree.selected_entity.connect(self.select_entity)
+        self.tree.selected_entity.connect(self._tree_entity_selected)
         self.invert_mouse_rotation_action.toggled.connect(self._invert_mouse_rotation_changed)
         self.show_entity_labels_action.toggled.connect(self._show_entity_labels_changed)
         self.line_index_labels_action.triggered.connect(lambda: self._label_mode_changed("index"))
@@ -392,8 +392,11 @@ class MainWindow(QMainWindow):
         if not self.document or not self.document.entities:
             self.play_button.setChecked(False)
             return
+        self.mode.setCurrentText("Playback")
         if self.playback_order >= len(self.document.entities) - 1:
             self._set_playback_order(0)
+        else:
+            self.tree.focus_playback_entity(self.document.entities[self.playback_order].entity_id)
         self.playback_timer.start()
         self.play_button.setText("Pause")
 
@@ -417,7 +420,10 @@ class MainWindow(QMainWindow):
         self.playback_progress.setValue(self.playback_order)
         self.playback_progress.blockSignals(False)
         entity = self.document.entities[self.playback_order]
+        self.current_id = entity.entity_id
         self.discovered_order = self.playback_order
+        self.details.show_entity(entity, self.document)
+        self.raw_source.setPlainText(entity.raw)
         builder = self.geometry_builder or GeometryBuilder(self.document)
         self.viewport.show_snapshot(
             builder.build(self.playback_order),
@@ -428,6 +434,8 @@ class MainWindow(QMainWindow):
             label_orders=self._label_orders(),
             label_time=self.discovered_order,
         )
+        if self.mode.currentText() == "Playback":
+            self.tree.focus_playback_entity(entity.entity_id)
         self.status.setText(
             f"Playback: #{entity.entity_id} {entity.type_name} · "
             f"{self.playback_order + 1}/{len(self.document.entities)}"
@@ -495,6 +503,19 @@ class MainWindow(QMainWindow):
             if mode == "Semantic" else ""
         )
         self._refresh_tree()
+        if mode == "Playback" and self.document and self.document.entities:
+            self.tree.focus_playback_entity(self.document.entities[self.playback_order].entity_id)
+
+    def _tree_entity_selected(self, entity_id: int):
+        if not self.document:
+            return
+        if self.mode.currentText() == "Playback":
+            self.play_button.setChecked(False)
+            entity = self.document.entity(entity_id)
+            if entity is not None:
+                self._set_playback_order(entity.order)
+        else:
+            self.select_entity(entity_id)
 
     def select_entity(self, entity_id: int, record_semantic_history: bool = True):
         if not self.document or entity_id not in self.document.by_id:

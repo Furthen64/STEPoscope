@@ -7,7 +7,7 @@ faces in VTK.
 
 The current first milestone provides:
 
-- File-order and semantic/reference tree views.
+- File-order, semantic/reference, and playback source-list views.
 - Semantic-mode color coding for geometry, topology, structure, and metadata.
 - `View > Show only geometry` filtering for a focused shape/topology view.
 - Previous/Next navigation, including reference-following in semantic mode.
@@ -62,7 +62,9 @@ toward the viewport background and eventually drop out.
 After opening a STEP file, use the playback panel below the viewer to play,
 pause, step forward or backward, or scrub through the build-up. Press `Space`
 over the OpenGL viewer to play/pause. `Tick rate` controls how many STEP
-entities are added per second and is persisted between sessions.
+entities are added per second and is persisted between sessions. Pressing Play
+switches to the Playback listing, which follows the current STEP record in file
+order. Click a record in that listing to pause and seek to it.
 
 Camera navigation also supports Blender-like middle-mouse orbiting; hold
 Shift while dragging with the middle mouse button to pan. Press `R` over the

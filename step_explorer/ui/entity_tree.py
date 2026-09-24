@@ -11,7 +11,7 @@ except ImportError:  # pragma: no cover - exercised only without GUI extras
 
 
 class EntityTree(QTreeWidget):
-    """Entity tree supporting physical order and reference traversal modes."""
+    """Entity tree supporting file, semantic, and playback listings."""
 
     selected_entity = Signal(int)
 
@@ -24,9 +24,11 @@ class EntityTree(QTreeWidget):
     def set_document(self, document, mode: str = "File order", geometry_only: bool = False) -> None:
         self.document = document
         self.clear()
+        self.setHeaderLabels(["Line", "STEP source"] if mode == "Playback" else ["Entity", "Type"])
         self.semantic_coloring = mode == "Semantic"
         self.geometry_only = geometry_only
         self.visible_entity_ids: list[int] = []
+        self.playback_items: dict[int, QTreeWidgetItem] = {}
         if mode == "Semantic":
             roots = [entity for entity in document.entities if not document.incoming.get(entity.entity_id)]
             if not roots:
@@ -35,12 +37,25 @@ class EntityTree(QTreeWidget):
                 self._add_semantic(self.invisibleRootItem(), entity.entity_id, set(), 0)
         else:
             for entity in document.entities:
-                if not self._is_visible(entity):
+                if mode != "Playback" and not self._is_visible(entity):
                     continue
-                item = self._item_for(entity)
+                if mode == "Playback":
+                    source = entity.raw.replace("\r", " ").replace("\n", " ").strip()
+                    item = QTreeWidgetItem([str(entity.span.line), source])
+                    item.setData(0, Qt.ItemDataRole.UserRole, entity.entity_id)
+                    item.setToolTip(1, entity.raw)
+                    self.playback_items[entity.entity_id] = item
+                else:
+                    item = self._item_for(entity)
                 self.addTopLevelItem(item)
                 self.visible_entity_ids.append(entity.entity_id)
         self.expandToDepth(1)
+
+    def focus_playback_entity(self, entity_id: int) -> None:
+        item = self.playback_items.get(entity_id)
+        if item is not None:
+            self.setCurrentItem(item)
+            self.scrollToItem(item)
 
     def _add_semantic(self, parent, entity_id: int, path: set[int], depth: int) -> None:
         entity = self.document.entity(entity_id)
