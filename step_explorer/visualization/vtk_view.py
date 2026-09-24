@@ -127,6 +127,7 @@ class VtkView(QWidget):
     # placement is performed in display space. A few hundred useful labels are
     # much more responsive than tens of thousands of overlapping actors.
     DEFAULT_MAX_ENTITY_LABELS = 250
+    DEFAULT_CONTROL_NET_DENSITY = 100
     LABEL_SPACING = 42.0
     LABEL_GRID_SIZE = 48.0
 
@@ -134,13 +135,16 @@ class VtkView(QWidget):
         self,
         parent=None,
         invert_mouse_rotation: bool = False,
+        autozoom: bool = True,
         max_entity_labels: int = DEFAULT_MAX_ENTITY_LABELS,
     ):
         super().__init__(parent)
         self.invert_mouse_rotation = bool(invert_mouse_rotation)
+        self.autozoom = bool(autozoom)
         self.max_entity_labels = self._clamp_label_limit(max_entity_labels)
         self._actors = []
         self._initialized = False
+        self._fit_camera_on_next_render = True
         self._last_snapshot = None
         self._last_selected_id = None
         self._last_labels = False
@@ -148,6 +152,7 @@ class VtkView(QWidget):
         self._last_label_texts: dict[int, str] = {}
         self._last_label_orders: dict[int, int] = {}
         self._last_label_time = 0
+        self._last_control_net_densities: dict[int, int] = {}
         self._active_label_orders: dict[int, int] = {}
         self._active_label_time = 0
         if vtk is None or QVTKRenderWindowInteractor is None:
@@ -169,6 +174,29 @@ class VtkView(QWidget):
         self.invert_mouse_rotation = bool(enabled)
         if self.renderer is not None:
             self.interactor_style.set_invert_rotation(self.invert_mouse_rotation)
+
+    def set_autozoom(self, enabled: bool) -> None:
+        """Choose whether every snapshot refits the visible geometry."""
+
+        self.autozoom = bool(enabled)
+        if self.autozoom:
+            self.fit_camera()
+
+    def fit_next_snapshot(self) -> None:
+        """Ensure the next rendered snapshot is framed, even with autozoom off."""
+
+        self._fit_camera_on_next_render = True
+
+    def fit_camera(self) -> None:
+        """Immediately frame the current scene and preserve that choice for a later render if needed."""
+
+        self._fit_camera_on_next_render = True
+        if self.renderer is None or not self._initialized:
+            return
+        self.renderer.ResetCamera()
+        self.renderer.ResetCameraClippingRange()
+        self._fit_camera_on_next_render = False
+        self.widget.GetRenderWindow().Render()
 
     def set_labels(self, enabled: bool) -> None:
         self._last_labels = bool(enabled)
@@ -260,6 +288,7 @@ class VtkView(QWidget):
         label_texts: dict[int, str] | None = None,
         label_orders: dict[int, int] | None = None,
         label_time: int | None = None,
+        control_net_densities: dict[int, int] | None = None,
     ) -> None:
         if self.renderer is None:
             return
@@ -270,6 +299,7 @@ class VtkView(QWidget):
         self._last_label_texts = label_texts or {}
         self._last_label_orders = label_orders or {}
         self._last_label_time = label_time if label_time is not None else 0
+        self._last_control_net_densities = control_net_densities or {}
         if not self._initialized:
             return
         self._render_snapshot(
@@ -291,6 +321,7 @@ class VtkView(QWidget):
         label_texts,
         label_orders,
         label_time: int,
+        control_net_densities: dict[int, int] | None = None,
     ) -> None:
         for actor in self._actors:
             self.renderer.RemoveActor(actor)
@@ -298,6 +329,7 @@ class VtkView(QWidget):
         self._label_specs: list[_LabelSpec] = []
         self._active_label_orders = label_orders
         self._active_label_time = label_time
+        control_net_densities = control_net_densities or self._last_control_net_densities
         label_scale = self._label_scale(snapshot) if labels else 1.0
         for entity_id, point in snapshot.points.items():
             self._add_point(
@@ -334,6 +366,15 @@ class VtkView(QWidget):
                 label_scale,
                 self._label_text(polyline.entity_id, label_mode, label_texts),
             )
+        for control_net in snapshot.control_nets:
+            density = control_net_densities.get(control_net.entity_id, self.DEFAULT_CONTROL_NET_DENSITY)
+            self._add_control_net(
+                control_net.at_density(density),
+                selected_id == control_net.entity_id,
+                labels,
+                label_scale,
+                self._label_text(control_net.entity_id, label_mode, label_texts),
+            )
         for face in snapshot.faces:
             self._add_mesh(
                 face,
@@ -342,7 +383,10 @@ class VtkView(QWidget):
                 label_scale,
                 self._label_text(face.entity_id, label_mode, label_texts),
             )
-        self.renderer.ResetCamera()
+        if self.autozoom or self._fit_camera_on_next_render:
+            self.renderer.ResetCamera()
+            self.renderer.ResetCameraClippingRange()
+            self._fit_camera_on_next_render = False
         if labels:
             self._place_labels()
         self.widget.GetRenderWindow().Render()
@@ -350,6 +394,7 @@ class VtkView(QWidget):
     def _label_scale(self, snapshot) -> float:
         points = [*snapshot.points.values(), *snapshot.vertices.values()]
         points.extend(point for polyline in snapshot.polylines for point in polyline.points)
+        points.extend(point for control_net in snapshot.control_nets for point in control_net.point_markers)
         points.extend(point for face in snapshot.faces for point in face.points)
         if not points:
             return 1.0
@@ -573,6 +618,54 @@ class VtkView(QWidget):
         self.renderer.AddActor(actor); self._actors.append(actor)
         if labels:
             self._add_label(entity_id, self._center(points), color, label_scale, label_text, selected, 1)
+
+    def _add_control_net(self, control_net, selected, labels, label_scale, label_text):
+        """Render one B-spline control net as a compact point-and-line actor."""
+
+        points = vtk.vtkPoints()
+        for point in control_net.point_markers:
+            points.InsertNextPoint(point.x, point.y, point.z)
+        markers = vtk.vtkCellArray()
+        for index in range(len(control_net.point_markers)):
+            markers.InsertNextCell(1)
+            markers.InsertCellPoint(index)
+        lines = vtk.vtkCellArray()
+        for row in range(control_net.row_count):
+            line = vtk.vtkPolyLine()
+            line.GetPointIds().SetNumberOfIds(control_net.column_count)
+            for column in range(control_net.column_count):
+                line.GetPointIds().SetId(column, row * control_net.column_count + column)
+            lines.InsertNextCell(line)
+        for column in range(control_net.column_count):
+            line = vtk.vtkPolyLine()
+            line.GetPointIds().SetNumberOfIds(control_net.row_count)
+            for row in range(control_net.row_count):
+                line.GetPointIds().SetId(row, row * control_net.column_count + column)
+            lines.InsertNextCell(line)
+        data = vtk.vtkPolyData()
+        data.SetPoints(points)
+        data.SetVerts(markers)
+        data.SetLines(lines)
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(data)
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetPointSize(9 if selected else 7)
+        actor.GetProperty().SetLineWidth(3 if selected else 2)
+        color = (1.0, 0.3, 0.2) if selected else color_for_category("Control Net")
+        actor.GetProperty().SetColor(*color)
+        self.renderer.AddActor(actor)
+        self._actors.append(actor)
+        if labels:
+            self._add_label(
+                control_net.entity_id,
+                self._center(control_net.point_markers),
+                color,
+                label_scale,
+                label_text,
+                selected,
+                0,
+            )
 
     def _add_mesh(self, mesh, selected, labels, label_scale, label_text):
         points = vtk.vtkPoints()

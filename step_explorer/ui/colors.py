@@ -17,6 +17,7 @@ STRUCTURE_HINTS = (
 CATEGORY_COLORS = {
     "Topology": "#ffb74d",
     "Geometry": "#4fc3f7",
+    "Control Net": "#81c784",
     "Structure": "#ce93d8",
     "Metadata": "#90a4ae",
 }

@@ -14,6 +14,7 @@ class AppConfig:
 
     invert_mouse_rotation: bool = False
     show_entity_labels: bool = False
+    autozoom: bool = True
     label_mode: str = "index"
     max_entity_labels: int = 250
 
@@ -64,6 +65,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     invert_rotation = values.get("invert_mouse_rotation", False)
     show_labels = values.get("show_entity_labels", False)
+    autozoom = values.get("autozoom", True)
     label_mode = values.get("label_mode", "index")
     max_entity_labels = values.get("max_entity_labels", 250)
     if not isinstance(label_mode, str) or label_mode not in {"index", "type"}:
@@ -75,6 +77,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     return AppConfig(
         invert_mouse_rotation=invert_rotation if isinstance(invert_rotation, bool) else False,
         show_entity_labels=show_labels if isinstance(show_labels, bool) else False,
+        autozoom=autozoom if isinstance(autozoom, bool) else True,
         label_mode=label_mode,
         max_entity_labels=max_entity_labels,
     )

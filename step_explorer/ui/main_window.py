@@ -5,6 +5,7 @@ from pathlib import Path
 from ..config import AppConfig, load_config
 from ..geometry import GeometryBuilder
 from ..step.parser import StepDocument
+from ..step.export import save_geometry_only_step
 from .entity_details import EntityDetails
 from .entity_tree import EntityTree
 from ..visualization.vtk_view import VtkView
@@ -19,8 +20,11 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QComboBox,
+    QFrame,
     QTabWidget,
     QToolBar,
+    QToolButton,
+    QScrollArea,
     QHBoxLayout,
     QSlider,
     QSpinBox,
@@ -67,9 +71,15 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("STEPoscope", "STEPoscope")
         self.invert_mouse_rotation = self._load_invert_mouse_rotation()
         self.show_entity_labels = self._load_show_entity_labels()
+        self.autozoom = self._load_autozoom()
         self.label_mode = self._load_label_mode()
         self.playback_tick_rate = self._load_playback_tick_rate()
         self.playback_order = 0
+        self.control_net_densities: dict[int, int] = {}
+        self._control_nets_by_id = {}
+        self._control_net_statuses_by_id = {}
+        self._surface_control_status_labels: dict[int, QLabel] = {}
+        self.surface_control_sliders: dict[int, QSlider] = {}
         self.playback_timer = QTimer(self)
         self.playback_timer.setInterval(self._playback_interval())
         self.playback_timer.timeout.connect(self._playback_tick)
@@ -86,6 +96,7 @@ class MainWindow(QMainWindow):
         self.details_tabs.addTab(self.raw_source, "Raw STEP")
         self.viewport = VtkView(
             invert_mouse_rotation=self.invert_mouse_rotation,
+            autozoom=self.autozoom,
             max_entity_labels=self.config.max_entity_labels,
         )
         self.mode = QComboBox(); self.mode.addItems(["File order", "Semantic", "Playback"])
@@ -94,6 +105,8 @@ class MainWindow(QMainWindow):
         self.previous_button = QPushButton("Previous")
         self.next_button = QPushButton("Next")
         self.open_button = QPushButton("Open STEP…")
+        self.save_geometry_button = QPushButton("Save Geometry only STEP file")
+        self.save_geometry_button.setEnabled(False)
         self.play_button = QPushButton("Play")
         self.play_button.setCheckable(True)
         self.step_backward_button = QPushButton("Step backward")
@@ -126,6 +139,10 @@ class MainWindow(QMainWindow):
         open_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         open_action.triggered.connect(self.open_dialog)
         file_menu.addAction(open_action)
+        self.save_geometry_action = QAction("Save Geometry only STEP file…", self)
+        self.save_geometry_action.setEnabled(False)
+        self.save_geometry_action.triggered.connect(self.save_geometry_dialog)
+        file_menu.addAction(self.save_geometry_action)
         self.recent_menu = file_menu.addMenu("Recent files")
         self.recent_menu.aboutToShow.connect(self._populate_recent_menu)
         file_menu.addSeparator()
@@ -154,6 +171,12 @@ class MainWindow(QMainWindow):
         self.invert_mouse_rotation_action.setChecked(self.invert_mouse_rotation)
         self.invert_mouse_rotation_action.setToolTip("Reverse the direction of camera rotation while dragging")
         view_menu.addAction(self.invert_mouse_rotation_action)
+        self.autozoom_action = QAction("Autozoom", self)
+        self.autozoom_action.setCheckable(True)
+        self.autozoom_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.autozoom_action.setChecked(self.autozoom)
+        self.autozoom_action.setToolTip("Fit the camera to visible geometry after every playback update")
+        view_menu.addAction(self.autozoom_action)
         self.show_entity_labels_action = QAction("Show entity labels", self)
         self.show_entity_labels_action.setCheckable(True)
         self.show_entity_labels_action.setShortcut("L")
@@ -189,6 +212,11 @@ class MainWindow(QMainWindow):
             return self.config.show_entity_labels
         return bool(self.settings.value("show_entity_labels", False, type=bool))
 
+    def _load_autozoom(self) -> bool:
+        if not self.settings.contains("autozoom"):
+            return self.config.autozoom
+        return bool(self.settings.value("autozoom", True, type=bool))
+
     def _load_label_mode(self) -> str:
         if not self.settings.contains("label_mode"):
             return self.config.label_mode
@@ -203,6 +231,12 @@ class MainWindow(QMainWindow):
         self.settings.setValue("invert_mouse_rotation", enabled)
         self.settings.sync()
         self.viewport.set_invert_mouse_rotation(enabled)
+
+    def _autozoom_changed(self, enabled: bool):
+        self.autozoom = enabled
+        self.settings.setValue("autozoom", enabled)
+        self.settings.sync()
+        self.viewport.set_autozoom(enabled)
 
     def _show_entity_labels_changed(self, enabled: bool):
         self.show_entity_labels = enabled
@@ -229,18 +263,27 @@ class MainWindow(QMainWindow):
         return {entity.entity_id: entity.order for entity in self.document.entities}
 
     def _refresh_viewport(self):
+        self._refresh_viewport_with_surface_controls()
+
+    def _refresh_viewport_with_surface_controls(self, update_surface_controls: bool = True):
         if not self.document or not self.document.entities:
             return
         builder = self.geometry_builder or GeometryBuilder(self.document)
         snapshot = builder.build(self.discovered_order)
+        self._show_snapshot(snapshot, self.current_id, update_surface_controls)
+
+    def _show_snapshot(self, snapshot, selected_id: int | None, update_surface_controls: bool = True):
+        if update_surface_controls:
+            self._update_surface_controls(snapshot)
         self.viewport.show_snapshot(
             snapshot,
-            selected_id=self.current_id,
+            selected_id=selected_id,
             labels=self.show_entity_labels,
             label_mode=self.label_mode,
             label_texts=self._label_texts(),
             label_orders=self._label_orders(),
             label_time=self.discovered_order,
+            control_net_densities=self.control_net_densities,
         )
 
     def _load_recent_files(self) -> list[str]:
@@ -279,6 +322,7 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         toolbar.addWidget(self.open_button)
+        toolbar.addWidget(self.save_geometry_button)
         toolbar.addSeparator()
         toolbar.addWidget(QLabel(" Mode: "))
         toolbar.addWidget(self.mode)
@@ -310,6 +354,7 @@ class MainWindow(QMainWindow):
         playback_controls_layout.addWidget(self.playback_frame_label)
         playback_layout.addWidget(playback_controls)
         playback_layout.addWidget(self.hotkey_legend)
+        self._build_surface_control_panel(playback_layout)
 
         central_widget = QWidget()
         central_layout = QVBoxLayout(central_widget)
@@ -327,11 +372,13 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self.open_button.clicked.connect(self.open_dialog)
+        self.save_geometry_button.clicked.connect(self.save_geometry_dialog)
         self.previous_button.clicked.connect(lambda: self.navigate(-1))
         self.next_button.clicked.connect(lambda: self.navigate(1))
         self.mode.currentTextChanged.connect(self._mode_changed)
         self.tree.selected_entity.connect(self._tree_entity_selected)
         self.invert_mouse_rotation_action.toggled.connect(self._invert_mouse_rotation_changed)
+        self.autozoom_action.toggled.connect(self._autozoom_changed)
         self.show_entity_labels_action.toggled.connect(self._show_entity_labels_changed)
         self.line_index_labels_action.triggered.connect(lambda: self._label_mode_changed("index"))
         self.type_labels_action.triggered.connect(lambda: self._label_mode_changed("type"))
@@ -340,6 +387,7 @@ class MainWindow(QMainWindow):
         self.step_forward_button.clicked.connect(lambda: self.step_playback(1))
         self.playback_progress.valueChanged.connect(self._playback_frame_changed)
         self.playback_tick_rate_spin.valueChanged.connect(self._playback_tick_rate_changed)
+        self.surface_control_toggle.toggled.connect(self._surface_controls_toggled)
         self._update_playback_controls()
 
         # QVTKRenderWindowInteractor consumes key events for its own camera
@@ -348,6 +396,109 @@ class MainWindow(QMainWindow):
         vtk_widget = getattr(self.viewport, "widget", None)
         if vtk_widget is not None:
             vtk_widget.installEventFilter(self)
+
+    def _build_surface_control_panel(self, parent_layout):
+        """Create the collapsible mixer displayed only for B-spline surfaces."""
+
+        self.surface_control_panel = QFrame()
+        panel_layout = QVBoxLayout(self.surface_control_panel)
+        panel_layout.setContentsMargins(0, 2, 0, 0)
+        self.surface_control_toggle = QToolButton()
+        self.surface_control_toggle.setText("Surface control nets")
+        self.surface_control_toggle.setCheckable(True)
+        self.surface_control_toggle.setChecked(True)
+        self.surface_control_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.surface_control_toggle.setArrowType(Qt.ArrowType.DownArrow)
+        self.surface_control_toggle.setToolTip("Show or hide B-spline control-net channels")
+        panel_layout.addWidget(self.surface_control_toggle)
+        self.surface_control_scroll = QScrollArea()
+        self.surface_control_scroll.setWidgetResizable(True)
+        self.surface_control_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.surface_control_scroll.setFixedHeight(154)
+        self.surface_control_content = QWidget()
+        self.surface_control_layout = QHBoxLayout(self.surface_control_content)
+        self.surface_control_layout.setContentsMargins(8, 2, 8, 2)
+        self.surface_control_layout.setSpacing(12)
+        self.surface_control_scroll.setWidget(self.surface_control_content)
+        panel_layout.addWidget(self.surface_control_scroll)
+        self.surface_control_panel.setVisible(False)
+        parent_layout.addWidget(self.surface_control_panel)
+
+    def _surface_controls_toggled(self, expanded: bool):
+        self.surface_control_scroll.setVisible(expanded)
+        self.surface_control_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+        )
+
+    def _clear_surface_control_channels(self):
+        while self.surface_control_layout.count():
+            item = self.surface_control_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self._surface_control_status_labels = {}
+        self.surface_control_sliders = {}
+
+    def _update_surface_controls(self, snapshot):
+        statuses = snapshot.control_net_statuses
+        self._control_nets_by_id = {control_net.entity_id: control_net for control_net in snapshot.control_nets}
+        self._control_net_statuses_by_id = {status.entity_id: status for status in statuses}
+        self._clear_surface_control_channels()
+        self.surface_control_panel.setVisible(bool(statuses))
+        if not statuses:
+            return
+        for status in statuses:
+            surface_id = status.entity_id
+            control_net = self._control_nets_by_id.get(surface_id)
+            density = self.control_net_densities.setdefault(surface_id, 100)
+            channel = QFrame()
+            channel.setFrameShape(QFrame.Shape.StyledPanel)
+            channel.setMinimumWidth(128)
+            channel_layout = QVBoxLayout(channel)
+            channel_layout.setContentsMargins(8, 5, 8, 5)
+            title = QLabel(f"#{surface_id}")
+            title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            channel_layout.addWidget(title)
+            status_label = QLabel(self._surface_control_status_text(status, control_net, density))
+            status_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            status_label.setWordWrap(True)
+            channel_layout.addWidget(status_label)
+            slider = QSlider(Qt.Orientation.Vertical)
+            slider.setRange(0, 100)
+            slider.setSingleStep(1)
+            slider.setPageStep(10)
+            slider.setValue(density)
+            slider.setEnabled(status.state == "ready" and control_net is not None)
+            slider.setAccessibleName(f"Control-net density for surface #{surface_id}")
+            slider.setAccessibleDescription(
+                "Adjust the number of evenly distributed control points shown for this surface."
+            )
+            slider.setToolTip("Control-net density: coarse at the bottom, full detail at the top")
+            slider.valueChanged.connect(
+                lambda value, current_surface_id=surface_id: self._control_net_density_changed(
+                    current_surface_id, value
+                )
+            )
+            channel_layout.addWidget(slider, 1, Qt.AlignmentFlag.AlignHCenter)
+            self._surface_control_status_labels[surface_id] = status_label
+            self.surface_control_sliders[surface_id] = slider
+            self.surface_control_layout.addWidget(channel)
+        self.surface_control_layout.addStretch(1)
+
+    @staticmethod
+    def _surface_control_status_text(status, control_net, density: int) -> str:
+        if status.state != "ready" or control_net is None:
+            return status.description
+        displayed = control_net.at_density(density)
+        return f"Ready\n{len(displayed.point_markers)} / {len(control_net.point_markers)} points"
+
+    def _control_net_density_changed(self, surface_id: int, density: int):
+        self.control_net_densities[surface_id] = density
+        status = self._control_net_statuses_by_id.get(surface_id)
+        control_net = self._control_nets_by_id.get(surface_id)
+        label = self._surface_control_status_labels.get(surface_id)
+        if status is not None and label is not None:
+            label.setText(self._surface_control_status_text(status, control_net, density))
+        self._refresh_viewport_with_surface_controls(update_surface_controls=False)
 
     def eventFilter(self, watched, event):
         viewport_widget = getattr(self.viewport, "widget", None)
@@ -425,15 +576,7 @@ class MainWindow(QMainWindow):
         self.details.show_entity(entity, self.document)
         self.raw_source.setPlainText(entity.raw)
         builder = self.geometry_builder or GeometryBuilder(self.document)
-        self.viewport.show_snapshot(
-            builder.build(self.playback_order),
-            selected_id=entity.entity_id,
-            labels=self.show_entity_labels,
-            label_mode=self.label_mode,
-            label_texts=self._label_texts(),
-            label_orders=self._label_orders(),
-            label_time=self.discovered_order,
-        )
+        self._show_snapshot(builder.build(self.playback_order), entity.entity_id)
         if self.mode.currentText() == "Playback":
             self.tree.focus_playback_entity(entity.entity_id)
         self.status.setText(
@@ -459,6 +602,30 @@ class MainWindow(QMainWindow):
         if path:
             self.open_path(path)
 
+    def save_geometry_dialog(self):
+        if self.document is None:
+            return
+        source_path = getattr(self, "source_path", None)
+        suggested = str(Path(source_path).with_name(f"{Path(source_path).stem}_geometry.step")) if source_path else "geometry.step"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Geometry only STEP file", suggested,
+            "STEP files (*.step *.stp);;All files (*)",
+        )
+        if not path:
+            return
+        destination = Path(path)
+        if not destination.suffix:
+            destination = destination.with_suffix(".step")
+        if source_path and destination.expanduser().resolve() == Path(source_path).expanduser().resolve():
+            QMessageBox.warning(self, "Choose another file", "Save the geometry-only copy under a different name.")
+            return
+        try:
+            count = save_geometry_only_step(self.document, destination)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Could not save STEP file", str(exc))
+            return
+        self.status.setText(f"Saved {count} geometry and supporting entities to {destination.name}")
+
     def open_path(self, path: str):
         self.play_button.setChecked(False)
         try:
@@ -467,7 +634,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not parse STEP file", str(exc))
             return
         self._add_recent_file(path)
+        self.source_path = path
+        self.save_geometry_button.setEnabled(True)
+        self.save_geometry_action.setEnabled(True)
         self.geometry_builder = GeometryBuilder(self.document)
+        self.viewport.fit_next_snapshot()
+        self.control_net_densities.clear()
         self.playback_order = 0
         self.playback_progress.setRange(0, max(0, len(self.document.entities) - 1))
         self.playback_progress.setValue(0)
@@ -477,7 +649,11 @@ class MainWindow(QMainWindow):
         self.semantic_history = []
         self.semantic_cursor = -1
         self.discovered_order = -1
-        self._refresh_tree()
+        self.current_id = self.document.entities[0].entity_id if self.document.entities else None
+        if self.mode.currentText() == "Semantic":
+            self._refresh_tree()
+        else:
+            self.mode.setCurrentText("Semantic")
         if self.document.entities:
             self.select_entity(self.document.entities[0].entity_id)
 
@@ -537,15 +713,7 @@ class MainWindow(QMainWindow):
         self.playback_progress.setValue(self.playback_order)
         self.playback_progress.blockSignals(False)
         snapshot = (self.geometry_builder or GeometryBuilder(self.document)).build(self.discovered_order)
-        self.viewport.show_snapshot(
-            snapshot,
-            selected_id=entity_id,
-            labels=self.show_entity_labels,
-            label_mode=self.label_mode,
-            label_texts=self._label_texts(),
-            label_orders=self._label_orders(),
-            label_time=self.discovered_order,
-        )
+        self._show_snapshot(snapshot, entity_id)
         self.status.setText(f"#{entity_id} {entity.type_name} · {entity.order + 1}/{len(self.document.entities)}")
 
     def navigate(self, delta: int):

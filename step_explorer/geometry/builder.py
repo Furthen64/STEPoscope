@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 import math
+from typing import Literal
 
 import vtkmodules.all as vtk
 
@@ -31,12 +32,121 @@ class Mesh:
     curved: bool = False
 
 
+@dataclass(frozen=True)
+class ControlNet:
+    """A rectangular B-spline control-point grid, independent of rendering.
+
+    Rows preserve the first aggregate dimension in the STEP surface entity;
+    columns preserve its second aggregate dimension.  The points describe a
+    control cage, rather than samples guaranteed to lie on the surface.
+    """
+
+    entity_id: int
+    rows: tuple[tuple[Point3, ...], ...]
+
+    def __post_init__(self) -> None:
+        if len(self.rows) < 2:
+            raise ValueError("a control net needs at least two rows")
+        column_count = len(self.rows[0])
+        if column_count < 2:
+            raise ValueError("a control net needs at least two columns")
+        if any(len(row) != column_count for row in self.rows):
+            raise ValueError("a control net must be rectangular")
+
+    @property
+    def row_count(self) -> int:
+        return len(self.rows)
+
+    @property
+    def column_count(self) -> int:
+        return len(self.rows[0])
+
+    @property
+    def point_markers(self) -> tuple[Point3, ...]:
+        """Return every control point in STEP aggregate order."""
+
+        return tuple(point for row in self.rows for point in row)
+
+    @property
+    def row_segments(self) -> tuple[tuple[Point3, Point3], ...]:
+        """Return connections between horizontally adjacent control points."""
+
+        return tuple(
+            (row[index], row[index + 1])
+            for row in self.rows
+            for index in range(self.column_count - 1)
+        )
+
+    @property
+    def column_segments(self) -> tuple[tuple[Point3, Point3], ...]:
+        """Return connections between vertically adjacent control points."""
+
+        return tuple(
+            (self.rows[index][column], self.rows[index + 1][column])
+            for index in range(self.row_count - 1)
+            for column in range(self.column_count)
+        )
+
+    def at_density(self, density: int) -> "ControlNet":
+        """Return an evenly distributed coarse-to-full view of this control net.
+
+        A density of zero retains the four corner controls; 100 retains every
+        point. Intermediate levels select rows and columns across the full
+        control cage, rather than taking a local prefix of the grid.
+        """
+
+        if isinstance(density, bool) or not isinstance(density, int):
+            raise ValueError("control-net density must be an integer")
+        density = max(0, min(100, density))
+        row_indices = self._evenly_spaced_indices(self.row_count, density)
+        column_indices = self._evenly_spaced_indices(self.column_count, density)
+        return ControlNet(
+            self.entity_id,
+            tuple(tuple(self.rows[row][column] for column in column_indices) for row in row_indices),
+        )
+
+    @staticmethod
+    def _evenly_spaced_indices(count: int, density: int) -> tuple[int, ...]:
+        selected_count = 2 + round((count - 2) * density / 100)
+        if selected_count == count:
+            return tuple(range(count))
+        return tuple(round(index * (count - 1) / (selected_count - 1)) for index in range(selected_count))
+
+
+@dataclass(frozen=True)
+class ControlNetStatus:
+    """Playback readiness for a B-spline surface's control net."""
+
+    entity_id: int
+    state: Literal["waiting", "ready", "invalid"]
+    missing_point_ids: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.state not in {"waiting", "ready", "invalid"}:
+            raise ValueError(f"unsupported control-net state: {self.state}")
+        if self.state == "waiting" and not self.missing_point_ids:
+            raise ValueError("a waiting control net must identify missing points")
+        if self.state != "waiting" and self.missing_point_ids:
+            raise ValueError("only a waiting control net can have missing points")
+
+    @property
+    def description(self) -> str:
+        if self.state == "ready":
+            return "Control net ready"
+        if self.state == "invalid":
+            return "Invalid control-point grid"
+        count = len(self.missing_point_ids)
+        return f"Waiting for {count} control point{'s' if count != 1 else ''}"
+
+
 @dataclass
 class GeometrySnapshot:
     points: dict[int, Point3] = field(default_factory=dict)
     vertices: dict[int, Point3] = field(default_factory=dict)
     polylines: list[Polyline] = field(default_factory=list)
     faces: list[Mesh] = field(default_factory=list)
+    control_nets: list[ControlNet] = field(default_factory=list)
+    control_net_statuses: list[ControlNetStatus] = field(default_factory=list)
 
     def point_for(self, entity_id: int) -> Point3 | None:
         return self.points.get(entity_id) or self.vertices.get(entity_id)
@@ -70,6 +180,12 @@ class GeometryBuilder:
                 if len(coords) >= 3 and all(_number(item) is not None for item in coords[:3]):
                     snapshot.points[entity.entity_id] = Point3(*(_number(item) for item in coords[:3]))
         for entity in entities:
+            if entity.type_name.upper() == "B_SPLINE_SURFACE_WITH_KNOTS":
+                control_net, status = self._control_net(entity, snapshot)
+                snapshot.control_net_statuses.append(status)
+                if control_net:
+                    snapshot.control_nets.append(control_net)
+        for entity in entities:
             if entity.type_name.upper() == "VERTEX_POINT":
                 target = next((_ref(item) for item in entity.arguments if _ref(item) is not None), None)
                 if target in snapshot.points:
@@ -95,6 +211,51 @@ class GeometryBuilder:
                 if mesh:
                     snapshot.faces.append(mesh)
         return snapshot
+
+    @staticmethod
+    def _control_net(
+        entity: StepEntity, snapshot: GeometrySnapshot
+    ) -> tuple[ControlNet | None, ControlNetStatus]:
+        """Resolve a B-spline control grid and report its playback readiness.
+
+        The fourth B_SPLINE_SURFACE_WITH_KNOTS argument is its two-dimensional
+        `control_points_list`.  During playback it is common for the surface
+        to precede one or more referenced points, so an incomplete grid is
+        deliberately withheld instead of being partially fabricated.
+        """
+
+        if len(entity.arguments) < 4:
+            return None, ControlNetStatus(entity.entity_id, "invalid")
+        source_rows = _aggregate(entity.arguments[3])
+        if not source_rows:
+            return None, ControlNetStatus(entity.entity_id, "invalid")
+        rows: list[tuple[Point3, ...]] = []
+        missing_point_ids: list[int] = []
+        for source_row in source_rows:
+            point_refs = _aggregate(source_row)
+            if not point_refs:
+                return None, ControlNetStatus(entity.entity_id, "invalid")
+            points: list[Point3] = []
+            for value in point_refs:
+                point_id = _ref(value)
+                if point_id is None:
+                    return None, ControlNetStatus(entity.entity_id, "invalid")
+                point = snapshot.points.get(point_id)
+                if point is None:
+                    missing_point_ids.append(point_id)
+                    continue
+                points.append(point)
+            rows.append(tuple(points))
+        if missing_point_ids:
+            return None, ControlNetStatus(
+                entity.entity_id,
+                "waiting",
+                tuple(dict.fromkeys(missing_point_ids)),
+            )
+        try:
+            return ControlNet(entity.entity_id, tuple(rows)), ControlNetStatus(entity.entity_id, "ready")
+        except ValueError:
+            return None, ControlNetStatus(entity.entity_id, "invalid")
 
     def _edge_points(self, entity: StepEntity, snapshot: GeometrySnapshot) -> tuple[Point3, ...]:
         refs = [_ref(item) for item in entity.arguments if _ref(item) is not None][:2]
@@ -259,6 +420,11 @@ class GeometryBuilder:
             return None
         surface_id = next((_ref(item) for item in entity.arguments if _ref(item) is not None), None)
         surface = visible.get(surface_id or -1)
+        if surface and surface.type_name.upper() == "B_SPLINE_SURFACE_WITH_KNOTS":
+            # A B-spline boundary is not a planar polygon. Until surface
+            # evaluation exists, the matching control net is the honest
+            # preview; a triangulated fallback would falsely cap the loft.
+            return None
         curved = [segment for segment in loop_segments[0] if len(segment) > 2]
         if len(loops) == 1 and surface and surface.type_name.upper() == "CYLINDRICAL_SURFACE" and len(curved) == 2:
             first, second = curved

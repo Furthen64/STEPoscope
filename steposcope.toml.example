@@ -1,6 +1,9 @@
 # Copy this file to steposcope.toml (or ~/.config/steposcope/config.toml).
 # Reverse the direction of camera rotation while dragging with the mouse.
 invert_mouse_rotation = true
+# Refit the camera after every playback update. Turn this off to keep a
+# hand-positioned view while stepping or playing.
+autozoom = true
 # Show #entity labels next to points, edges, and faces.
 show_entity_labels = false
 # Label content: "index" shows #entity IDs; "type" shows Vertex, Edge, Face, etc.
