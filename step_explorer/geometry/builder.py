@@ -439,15 +439,56 @@ class GeometryBuilder:
                 triangles = []
                 for index in range(len(first) - 1):
                     triangles.extend(((index, index + 1, offset + index + 1), (index, offset + index + 1, offset + index)))
-                return Mesh(entity.entity_id, points, tuple(triangles), curved=True)
+                return Mesh(
+                    entity.entity_id, points,
+                    self._oriented_face_triangles(entity, surface, points, tuple(triangles)),
+                    curved=True,
+                )
         triangulated = self._triangulate_loops(loops)
         if triangulated:
             points, triangles = triangulated
-            return Mesh(entity.entity_id, points, triangles)
+            return Mesh(entity.entity_id, points, self._oriented_face_triangles(entity, surface, points, triangles))
         # Preserve the old dependency-free fallback for unusual non-planar
         # faces. The boundary wire remains authoritative in that case.
         polygon = max(loops, key=len)
-        return Mesh(entity.entity_id, tuple(polygon), tuple((0, index, index + 1) for index in range(1, len(polygon) - 1)))
+        points = tuple(polygon)
+        triangles = tuple((0, index, index + 1) for index in range(1, len(points) - 1))
+        return Mesh(entity.entity_id, points, self._oriented_face_triangles(entity, surface, points, triangles))
+
+    def _oriented_face_triangles(
+        self, face: StepEntity, surface: StepEntity | None,
+        points: tuple[Point3, ...], triangles: tuple[tuple[int, int, int], ...],
+    ) -> tuple[tuple[int, int, int], ...]:
+        """Align preview winding with the analytic surface and ADVANCED_FACE sense."""
+
+        if surface is None or surface.type_name.upper() not in {"PLANE", "CYLINDRICAL_SURFACE"}:
+            return triangles
+        placement_id = next((_ref(arg) for arg in surface.arguments if _ref(arg) is not None), None)
+        placement = self.document.entity(placement_id or -1)
+        if not placement or placement.type_name.upper() != "AXIS2_PLACEMENT_3D":
+            return triangles
+        refs = [_ref(arg) for arg in placement.arguments if _ref(arg) is not None]
+        if not refs:
+            return triangles
+        origin = self._cartesian(refs[0])
+        axis_direction = self._direction(refs[1]) if len(refs) > 1 else (0.0, 0.0, 1.0)
+        axis = self._normalized(axis_direction) if axis_direction else None
+        if origin is None or axis is None:
+            return triangles
+        sense = next((arg for arg in reversed(face.arguments) if isinstance(arg, StepEnumeration)), None)
+        sign = -1.0 if sense and sense.value.upper() == "F" else 1.0
+        result = []
+        for a, b, c in triangles:
+            p, q, r = (points[index] for index in (a, b, c))
+            normal = self._cross((q.x - p.x, q.y - p.y, q.z - p.z), (r.x - p.x, r.y - p.y, r.z - p.z))
+            target = axis
+            if surface.type_name.upper() == "CYLINDRICAL_SURFACE":
+                center = tuple((getattr(p, coord) + getattr(q, coord) + getattr(r, coord)) / 3 for coord in ("x", "y", "z"))
+                delta = tuple(center[index] - getattr(origin, coord) for index, coord in enumerate(("x", "y", "z")))
+                axial_distance = self._dot(delta, axis)
+                target = tuple(delta[index] - axial_distance * axis[index] for index in range(3))
+            result.append((a, c, b) if self._dot(normal, target) * sign < 0 else (a, b, c))
+        return tuple(result)
 
     @staticmethod
     def _triangulate_loops(loops: list[list[Point3]]) -> tuple[tuple[Point3, ...], tuple[tuple[int, int, int], ...]] | None:

@@ -123,6 +123,8 @@ if vtk is not None:
 class VtkView(QWidget):
     """Render simple primitives; all STEP interpretation stays in GeometryBuilder."""
 
+    NORMAL_DISPLAY_MODES = ("Hidden", "Vectors", "Face orientation")
+
     # Labels are deliberately bounded: each label is a VTK actor and collision
     # placement is performed in display space. A few hundred useful labels are
     # much more responsive than tens of thousands of overlapping actors.
@@ -141,6 +143,7 @@ class VtkView(QWidget):
         super().__init__(parent)
         self.invert_mouse_rotation = bool(invert_mouse_rotation)
         self.autozoom = bool(autozoom)
+        self.normal_display = "Hidden"
         self.max_entity_labels = self._clamp_label_limit(max_entity_labels)
         self._actors = []
         self._initialized = False
@@ -181,6 +184,21 @@ class VtkView(QWidget):
         self.autozoom = bool(enabled)
         if self.autozoom:
             self.fit_camera()
+
+    def set_normal_display(self, mode: str) -> None:
+        if mode not in self.NORMAL_DISPLAY_MODES:
+            raise ValueError(f"Unknown normal display mode: {mode}")
+        self.normal_display = mode
+        if self.renderer is not None and self._initialized and self._last_snapshot is not None:
+            self._render_snapshot(
+                self._last_snapshot,
+                self._last_selected_id,
+                self._last_labels,
+                self._last_label_mode,
+                self._last_label_texts,
+                self._last_label_orders,
+                self._last_label_time,
+            )
 
     def fit_next_snapshot(self) -> None:
         """Ensure the next rendered snapshot is framed, even with autozoom off."""
@@ -330,6 +348,16 @@ class VtkView(QWidget):
         self._active_label_orders = label_orders
         self._active_label_time = label_time
         control_net_densities = control_net_densities or self._last_control_net_densities
+        if getattr(self, "normal_display", "Hidden") == "Vectors" and snapshot.faces:
+            face_points = [point for face in snapshot.faces for point in face.points]
+            extents = [
+                max(getattr(point, axis) for point in face_points)
+                - min(getattr(point, axis) for point in face_points)
+                for axis in ("x", "y", "z")
+            ]
+            self._normal_length = max(
+                max(extents) * 0.05, 1e-6,
+            )
         label_scale = self._label_scale(snapshot) if labels else 1.0
         for entity_id, point in snapshot.points.items():
             self._add_point(
@@ -678,21 +706,80 @@ class VtkView(QWidget):
         data = vtk.vtkPolyData(); data.SetPoints(points); data.SetPolys(triangles)
         mapper = vtk.vtkPolyDataMapper(); mapper.SetInputData(data)
         actor = vtk.vtkActor(); actor.SetMapper(mapper); actor.GetProperty().SetOpacity(0.35); actor.GetProperty().SetColor(0.3, 0.7, 1.0)
-        if mesh.curved:
+        orientation_mode = getattr(self, "normal_display", "Hidden") == "Face orientation"
+        if orientation_mode:
+            actor.GetProperty().SetColor(0.2, 0.5, 1.0)
+            actor.GetProperty().SetOpacity(1.0)
+            actor.GetProperty().LightingOff()
+            back = vtk.vtkProperty()
+            back.SetColor(1.0, 0.25, 0.2)
+            back.SetOpacity(1.0)
+            back.LightingOff()
+            actor.SetBackfaceProperty(back)
+            if selected:
+                actor.GetProperty().EdgeVisibilityOn()
+                actor.GetProperty().SetEdgeColor(1.0, 0.9, 0.2)
+                actor.GetProperty().SetLineWidth(2)
+        elif mesh.curved:
             # Shared vertices plus Phong interpolation make sampled analytic
             # surfaces read as smooth rather than as a row of flat facets.
             normals = vtk.vtkPolyDataNormals()
             normals.SetInputData(data)
             normals.SplittingOff()
-            normals.ConsistencyOn()
+            normals.ConsistencyOff()
             mapper.SetInputConnection(normals.GetOutputPort())
             actor.GetProperty().SetInterpolationToPhong()
         else:
             # Planar previews are triangulated with a fan. Lighting can give
             # those triangles different normals and create a diagonal split.
             actor.GetProperty().LightingOff()
-        if selected: actor.GetProperty().SetColor(1.0, 0.4, 0.2); actor.GetProperty().SetOpacity(0.55)
+        if selected and not orientation_mode: actor.GetProperty().SetColor(1.0, 0.4, 0.2); actor.GetProperty().SetOpacity(0.55)
         self.renderer.AddActor(actor); self._actors.append(actor)
+        if getattr(self, "normal_display", "Hidden") == "Vectors":
+            self._add_mesh_normals(mesh)
         if labels:
-            color = (1.0, 0.4, 0.2) if selected else (0.3, 0.7, 1.0)
+            color = (1.0, 0.9, 0.2) if selected and orientation_mode else ((1.0, 0.4, 0.2) if selected else (0.3, 0.7, 1.0))
             self._add_label(mesh.entity_id, self._center(mesh.points), color, label_scale, label_text, selected, 0)
+
+    def _add_mesh_normals(self, mesh) -> None:
+        """Show a small sample of arrows following the preview triangle winding."""
+
+        samples = mesh.triangles[::max(1, (len(mesh.triangles) + 23) // 24)] if mesh.curved else mesh.triangles[:1]
+        positions = vtk.vtkPoints()
+        directions = vtk.vtkFloatArray()
+        directions.SetNumberOfComponents(3)
+        directions.SetName("Normals")
+        for a, b, c in samples:
+            p, q, r = (mesh.points[index] for index in (a, b, c))
+            cross = (
+                (q.y - p.y) * (r.z - p.z) - (q.z - p.z) * (r.y - p.y),
+                (q.z - p.z) * (r.x - p.x) - (q.x - p.x) * (r.z - p.z),
+                (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x),
+            )
+            magnitude = sum(component * component for component in cross) ** 0.5
+            if magnitude <= 1e-12:
+                continue
+            positions.InsertNextPoint(*((getattr(p, axis) + getattr(q, axis) + getattr(r, axis)) / 3 for axis in ("x", "y", "z")))
+            directions.InsertNextTuple3(*(component / magnitude for component in cross))
+        if not positions.GetNumberOfPoints():
+            return
+        data = vtk.vtkPolyData()
+        data.SetPoints(positions)
+        data.GetPointData().SetNormals(directions)
+        arrow = vtk.vtkArrowSource()
+        glyph = vtk.vtkGlyph3D()
+        glyph.SetInputData(data)
+        glyph.SetSourceConnection(arrow.GetOutputPort())
+        glyph.SetVectorModeToUseNormal()
+        glyph.SetScaleModeToScaleByVector()
+        glyph.SetScaleFactor(getattr(self, "_normal_length", 1.0))
+        glyph.OrientOn()
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(glyph.GetOutputPort())
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(1.0, 0.9, 0.2)
+        actor.GetProperty().LightingOff()
+        actor.SetPickable(False)
+        self.renderer.AddActor(actor)
+        self._actors.append(actor)

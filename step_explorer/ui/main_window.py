@@ -100,6 +100,11 @@ class MainWindow(QMainWindow):
             max_entity_labels=self.config.max_entity_labels,
         )
         self.mode = QComboBox(); self.mode.addItems(["File order", "Semantic", "Playback"])
+        self.normal_display = QComboBox()
+        self.normal_display.addItems(VtkView.NORMAL_DISPLAY_MODES)
+        self.normal_display.setToolTip(
+            "Face orientation: blue shows the front of the preview surface; red shows its back"
+        )
         self.legend = QLabel()
         self.status = QLabel("Open an ISO-10303-21 STEP file to begin.")
         self.previous_button = QPushButton("Previous")
@@ -330,6 +335,9 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.next_button)
         toolbar.addSeparator()
         toolbar.addWidget(self.legend)
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" Normals: "))
+        toolbar.addWidget(self.normal_display)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.tree)
@@ -376,6 +384,7 @@ class MainWindow(QMainWindow):
         self.previous_button.clicked.connect(lambda: self.navigate(-1))
         self.next_button.clicked.connect(lambda: self.navigate(1))
         self.mode.currentTextChanged.connect(self._mode_changed)
+        self.normal_display.currentTextChanged.connect(self.viewport.set_normal_display)
         self.tree.selected_entity.connect(self._tree_entity_selected)
         self.invert_mouse_rotation_action.toggled.connect(self._invert_mouse_rotation_changed)
         self.autozoom_action.toggled.connect(self._autozoom_changed)

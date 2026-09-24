@@ -15,6 +15,8 @@ The current first milestone provides:
 - Previous/Next navigation, including reference-following in semantic mode.
 - Raw entity source, parsed arguments, source position, and reference lists.
 - Progressive geometry discovery with selected-entity highlighting.
+- A Normals dropdown with hidden, vector-arrow, and blue-front/red-back face
+  orientation displays.
 - A toolbar-driven three-pane layout with separate interpretation and raw-source tabs.
 - Persistent `File > Recent files` history containing the last five successfully opened files.
 - Optional TOML configuration for inverting camera rotation while dragging.
@@ -70,6 +72,14 @@ over the OpenGL viewer to play/pause. `Tick rate` controls how many STEP
 entities are added per second and is persisted between sessions. Pressing Play
 switches to the Playback listing, which follows the current STEP record in file
 order. Click a record in that listing to pause and seek to it.
+
+The **Normals** dropdown changes how rendered faces show orientation. **Vectors**
+draws arrows along the preview mesh normals. **Face orientation** shows blue
+front faces and red back faces as seen from the camera; rotate the model to
+inspect both sides. Red is not by itself proof of a bad face. For planar and
+cylindrical faces, STEPoscope aligns preview triangles with the STEP face sense.
+Unsupported or unevaluated surfaces, including B-spline surfaces, cannot yet
+provide a reliable normal diagnostic.
 
 ## B-spline control-net previews
 
