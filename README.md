@@ -40,6 +40,37 @@ You can open a file directly with:
 uv run steposcope path/to/model.STEP
 ```
 
+## Headless shell orientation reports
+
+Generate deterministic JSON reports and PNG previews without opening gui:
+
+```sh
+uv run steposcope render model.step --out reports
+uv run python -m step_explorer render 'models/**/*.step' --out reports --camera iso --mode normals
+```
+
+For a quick local smoke test, run the bundled launcher. It renders `slot1.STEP`
+to `temp/headless_once` by default:
+
+```sh
+./headless_once.sh
+./headless_once.sh path/to/model.step --width 800 --height 600
+HEADLESS_OUT=/tmp/steposcope ./headless_once.sh path/to/model.step
+```
+
+The command accepts files, directories, and glob patterns. It writes one JSON
+report and PNG per input plus `summary.json`. Exit status 0 means every rendered
+shell is consistent, 1 means at least one face is inconsistent, and 2 means an
+input could not be read or parsed. In `normals` mode, blue faces have a signed
+volume contribution with the same sign as their shell total; red faces have the
+opposite sign. This is a shell consistency verdict, not a radial-normal test.
+
+The judge applies `ADVANCED_FACE` sense analytically to plane, cylinder, cone,
+sphere, and torus meshes. Each face records `sense_applied` in JSON. B-spline
+surfaces currently have `sense_applied: false`: STEPoscope shows their control
+nets but does not evaluate or tessellate the surface, so it makes no claim about
+their analytic side. No input geometry is healed or reoriented as a shell.
+
 To reverse the direction of mouse-driven camera rotation, create
 `steposcope.toml` in the working directory (or
 `~/.config/steposcope/config.toml`) with:

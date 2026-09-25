@@ -30,6 +30,9 @@ class Mesh:
     points: tuple[Point3, ...]
     triangles: tuple[tuple[int, int, int], ...]
     curved: bool = False
+    type_name: str = "UNKNOWN"
+    sense: str = ".T."
+    sense_applied: bool | str = False
 
 
 @dataclass(frozen=True)
@@ -443,17 +446,39 @@ class GeometryBuilder:
                     entity.entity_id, points,
                     self._oriented_face_triangles(entity, surface, points, tuple(triangles)),
                     curved=True,
+                    **self._face_metadata(entity, surface),
                 )
         triangulated = self._triangulate_loops(loops)
         if triangulated:
             points, triangles = triangulated
-            return Mesh(entity.entity_id, points, self._oriented_face_triangles(entity, surface, points, triangles))
+            return Mesh(
+                entity.entity_id, points,
+                self._oriented_face_triangles(entity, surface, points, triangles),
+                **self._face_metadata(entity, surface),
+            )
         # Preserve the old dependency-free fallback for unusual non-planar
         # faces. The boundary wire remains authoritative in that case.
         polygon = max(loops, key=len)
         points = tuple(polygon)
         triangles = tuple((0, index, index + 1) for index in range(1, len(points) - 1))
-        return Mesh(entity.entity_id, points, self._oriented_face_triangles(entity, surface, points, triangles))
+        return Mesh(
+            entity.entity_id, points,
+            self._oriented_face_triangles(entity, surface, points, triangles),
+            **self._face_metadata(entity, surface),
+        )
+
+    @staticmethod
+    def _face_metadata(face: StepEntity, surface: StepEntity | None) -> dict[str, object]:
+        sense = next((arg for arg in reversed(face.arguments) if isinstance(arg, StepEnumeration)), None)
+        type_name = surface.type_name.upper() if surface else "UNKNOWN"
+        return {
+            "type_name": type_name,
+            "sense": f".{sense.value.upper()}." if sense else ".T.",
+            "sense_applied": type_name in {
+                "PLANE", "CYLINDRICAL_SURFACE", "CONICAL_SURFACE",
+                "SPHERICAL_SURFACE", "TOROIDAL_SURFACE",
+            },
+        }
 
     def _oriented_face_triangles(
         self, face: StepEntity, surface: StepEntity | None,
@@ -461,7 +486,11 @@ class GeometryBuilder:
     ) -> tuple[tuple[int, int, int], ...]:
         """Align preview winding with the analytic surface and ADVANCED_FACE sense."""
 
-        if surface is None or surface.type_name.upper() not in {"PLANE", "CYLINDRICAL_SURFACE"}:
+        supported = {
+            "PLANE", "CYLINDRICAL_SURFACE", "CONICAL_SURFACE",
+            "SPHERICAL_SURFACE", "TOROIDAL_SURFACE",
+        }
+        if surface is None or surface.type_name.upper() not in supported:
             return triangles
         placement_id = next((_ref(arg) for arg in surface.arguments if _ref(arg) is not None), None)
         placement = self.document.entity(placement_id or -1)
@@ -481,12 +510,32 @@ class GeometryBuilder:
         for a, b, c in triangles:
             p, q, r = (points[index] for index in (a, b, c))
             normal = self._cross((q.x - p.x, q.y - p.y, q.z - p.z), (r.x - p.x, r.y - p.y, r.z - p.z))
+            surface_type = surface.type_name.upper()
             target = axis
-            if surface.type_name.upper() == "CYLINDRICAL_SURFACE":
-                center = tuple((getattr(p, coord) + getattr(q, coord) + getattr(r, coord)) / 3 for coord in ("x", "y", "z"))
-                delta = tuple(center[index] - getattr(origin, coord) for index, coord in enumerate(("x", "y", "z")))
-                axial_distance = self._dot(delta, axis)
-                target = tuple(delta[index] - axial_distance * axis[index] for index in range(3))
+            center = tuple((getattr(p, coord) + getattr(q, coord) + getattr(r, coord)) / 3 for coord in ("x", "y", "z"))
+            delta = tuple(center[index] - getattr(origin, coord) for index, coord in enumerate(("x", "y", "z")))
+            axial_distance = self._dot(delta, axis)
+            radial = tuple(delta[index] - axial_distance * axis[index] for index in range(3))
+            radial_unit = self._normalized(radial)
+            if surface_type == "CYLINDRICAL_SURFACE":
+                target = radial
+            elif surface_type == "CONICAL_SURFACE" and radial_unit:
+                numbers = [_number(arg) for arg in surface.arguments if _number(arg) is not None]
+                semi_angle = numbers[1] if len(numbers) > 1 else 0.0
+                target = tuple(
+                    math.cos(semi_angle) * radial_unit[index] - math.sin(semi_angle) * axis[index]
+                    for index in range(3)
+                )
+            elif surface_type == "SPHERICAL_SURFACE":
+                target = delta
+            elif surface_type == "TOROIDAL_SURFACE" and radial_unit:
+                numbers = [_number(arg) for arg in surface.arguments if _number(arg) is not None]
+                major_radius = numbers[0] if numbers else 0.0
+                tube_center = tuple(
+                    getattr(origin, coord) + major_radius * radial_unit[index]
+                    for index, coord in enumerate(("x", "y", "z"))
+                )
+                target = tuple(center[index] - tube_center[index] for index in range(3))
             result.append((a, c, b) if self._dot(normal, target) * sign < 0 else (a, b, c))
         return tuple(result)
 
