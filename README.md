@@ -60,10 +60,13 @@ HEADLESS_OUT=/tmp/steposcope ./headless_once.sh path/to/model.step
 
 The command accepts files, directories, and glob patterns. It writes one JSON
 report and PNG per input plus `summary.json`. Exit status 0 means every rendered
-shell is consistent, 1 means at least one face is inconsistent, and 2 means an
-input could not be read or parsed. In `normals` mode, blue faces have a signed
-volume contribution with the same sign as their shell total; red faces have the
-opposite sign. This is a shell consistency verdict, not a radial-normal test.
+shell is consistent, 1 means at least one shell is inconsistent, open, or
+unreliable, and 2 means an input could not be read or parsed. The judge checks
+that every mesh edge has two incident triangles, that both triangles traverse
+the edge in opposite directions, and that the closed shell has positive signed
+volume. The per-face signed-volume contribution remains diagnostic and does not
+determine the verdict. In `normals` mode, blue faces pass these shell checks and
+red faces do not.
 
 The judge applies `ADVANCED_FACE` sense analytically to plane, cylinder, cone,
 sphere, and torus meshes. Each face records `sense_applied` in JSON. B-spline

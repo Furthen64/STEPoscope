@@ -373,6 +373,8 @@ class GeometryBuilder:
 
     def _face_mesh(self, entity: StepEntity, snapshot: GeometrySnapshot, visible: dict[int, StepEntity]) -> Mesh | None:
         # AP203's ADVANCED_FACE has a bounds aggregate and a surface reference.
+        surface_id = next((_ref(item) for item in entity.arguments if _ref(item) is not None), None)
+        surface = visible.get(surface_id or -1)
         bound_ids: list[int] = []
         for argument in entity.arguments:
             bound_ids.extend(item.entity_id for item in _aggregate(argument) if isinstance(item, StepReference))
@@ -420,16 +422,28 @@ class GeometryBuilder:
                 loops.append(polygon)
                 loop_segments.append(segments)
         if not loops:
-            return None
-        surface_id = next((_ref(item) for item in entity.arguments if _ref(item) is not None), None)
-        surface = visible.get(surface_id or -1)
+            return self._closed_analytic_surface_mesh(entity, surface)
         if surface and surface.type_name.upper() == "B_SPLINE_SURFACE_WITH_KNOTS":
             # A B-spline boundary is not a planar polygon. Until surface
             # evaluation exists, the matching control net is the honest
             # preview; a triangulated fallback would falsely cap the loft.
             return None
+        if surface and surface.type_name.upper() == "CYLINDRICAL_SURFACE" and len(loops) == 2:
+            stitched = self._stitch_closed_loops(loops[0], loops[1])
+            if stitched:
+                points, triangles = stitched
+                return Mesh(
+                    entity.entity_id, points,
+                    self._oriented_face_triangles(entity, surface, points, triangles),
+                    curved=True,
+                    **self._face_metadata(entity, surface),
+                )
         curved = [segment for segment in loop_segments[0] if len(segment) > 2]
-        if len(loops) == 1 and surface and surface.type_name.upper() == "CYLINDRICAL_SURFACE" and len(curved) == 2:
+        ruled_surface_types = {
+            "CYLINDRICAL_SURFACE", "CONICAL_SURFACE",
+            "SPHERICAL_SURFACE", "TOROIDAL_SURFACE",
+        }
+        if len(loops) == 1 and surface and surface.type_name.upper() in ruled_surface_types and len(curved) == 2:
             first, second = curved
             if len(first) == len(second):
                 # A bounded cylindrical patch is a ruled strip between its two
@@ -466,6 +480,108 @@ class GeometryBuilder:
             self._oriented_face_triangles(entity, surface, points, triangles),
             **self._face_metadata(entity, surface),
         )
+
+    def _closed_analytic_surface_mesh(
+        self, face: StepEntity, surface: StepEntity | None
+    ) -> Mesh | None:
+        """Tessellate an unbounded closed sphere or torus without healing it."""
+
+        if surface is None or surface.type_name.upper() not in {"SPHERICAL_SURFACE", "TOROIDAL_SURFACE"}:
+            return None
+        placement_id = next((_ref(arg) for arg in surface.arguments if _ref(arg) is not None), None)
+        placement = self.document.entity(placement_id or -1)
+        if not placement or placement.type_name.upper() != "AXIS2_PLACEMENT_3D":
+            return None
+        refs = [_ref(arg) for arg in placement.arguments if _ref(arg) is not None]
+        origin = self._cartesian(refs[0]) if refs else None
+        axis = self._normalized(self._direction(refs[1]) or (0.0, 0.0, 1.0)) if len(refs) > 1 else (0.0, 0.0, 1.0)
+        x_axis = self._normalized(self._direction(refs[2])) if len(refs) > 2 and self._direction(refs[2]) else None
+        if origin is None or axis is None:
+            return None
+        if x_axis is None:
+            seed = (1.0, 0.0, 0.0) if abs(axis[0]) < 0.9 else (0.0, 1.0, 0.0)
+            x_axis = self._normalized(self._cross(seed, axis))
+        y_axis = self._normalized(self._cross(axis, x_axis)) if x_axis else None
+        numbers = [_number(arg) for arg in surface.arguments if _number(arg) is not None]
+        if x_axis is None or y_axis is None or not numbers:
+            return None
+
+        def point(radial: float, axial: float, angle: float) -> Point3:
+            return Point3(*(
+                getattr(origin, coord) + axial * axis[index]
+                + radial * (math.cos(angle) * x_axis[index] + math.sin(angle) * y_axis[index])
+                for index, coord in enumerate(("x", "y", "z"))
+            ))
+
+        around = 72
+        points: list[Point3] = []
+        triangles: list[tuple[int, int, int]] = []
+        if surface.type_name.upper() == "SPHERICAL_SURFACE":
+            radius, rings = numbers[0], 36
+            points.append(point(0.0, radius, 0.0))
+            for ring in range(1, rings):
+                latitude = math.pi / 2 - math.pi * ring / rings
+                for column in range(around):
+                    points.append(point(radius * math.cos(latitude), radius * math.sin(latitude), 2 * math.pi * column / around))
+            south = len(points)
+            points.append(point(0.0, -radius, 0.0))
+            for column in range(around):
+                following = (column + 1) % around
+                triangles.append((0, 1 + column, 1 + following))
+                for ring in range(rings - 2):
+                    row = 1 + ring * around
+                    next_row = row + around
+                    triangles.extend(((row + column, next_row + column, next_row + following),
+                                      (row + column, next_row + following, row + following)))
+                last_row = 1 + (rings - 2) * around
+                triangles.append((last_row + column, south, last_row + following))
+        else:
+            if len(numbers) < 2:
+                return None
+            major, minor, tube_steps = numbers[0], numbers[1], 36
+            for tube in range(tube_steps):
+                tube_angle = 2 * math.pi * tube / tube_steps
+                for column in range(around):
+                    angle = 2 * math.pi * column / around
+                    points.append(point(major + minor * math.cos(tube_angle), minor * math.sin(tube_angle), angle))
+            for tube in range(tube_steps):
+                next_tube = (tube + 1) % tube_steps
+                for column in range(around):
+                    following = (column + 1) % around
+                    a, b = tube * around + column, tube * around + following
+                    c, d = next_tube * around + column, next_tube * around + following
+                    triangles.extend(((a, c, d), (a, d, b)))
+        mesh_points = tuple(points)
+        return Mesh(
+            face.entity_id, mesh_points,
+            self._oriented_face_triangles(face, surface, mesh_points, tuple(triangles)),
+            curved=True,
+            **self._face_metadata(face, surface),
+        )
+
+    def _stitch_closed_loops(
+        self, first: list[Point3], second: list[Point3]
+    ) -> tuple[tuple[Point3, ...], tuple[tuple[int, int, int], ...]] | None:
+        """Create a ruled closed strip between equally sampled boundary loops."""
+
+        if len(first) != len(second) or len(first) < 3:
+            return None
+        count = len(first)
+        candidates = []
+        for source in (second, list(reversed(second))):
+            for shift in range(count):
+                aligned = source[shift:] + source[:shift]
+                score = sum(self._distance(a, b) ** 2 for a, b in zip(first, aligned))
+                candidates.append((score, aligned))
+        aligned = min(candidates, key=lambda item: item[0])[1]
+        points = tuple(first + aligned)
+        triangles = []
+        for index in range(count):
+            following = (index + 1) % count
+            triangles.extend(
+                ((index, following, count + following), (index, count + following, count + index))
+            )
+        return points, tuple(triangles)
 
     @staticmethod
     def _face_metadata(face: StepEntity, surface: StepEntity | None) -> dict[str, object]:

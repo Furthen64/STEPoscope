@@ -5,8 +5,8 @@ from step_explorer.geometry.builder import GeometryBuilder
 from step_explorer.step.parser import parse_step
 
 
-def _box_source(flipped_face: int | None = None) -> str:
-    points = ((-1,-1,-1),(1,-1,-1),(1,1,-1),(-1,1,-1),(-1,-1,1),(1,-1,1),(1,1,1),(-1,1,1))
+def _box_source(flipped_face: int | None = None, low: int = -1, high: int = 1) -> str:
+    points = ((low,low,low),(high,low,low),(high,high,low),(low,high,low),(low,low,high),(high,low,high),(high,high,high),(low,high,high))
     faces = ((0,3,2,1),(4,5,6,7),(0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7))
     lines = ["ISO-10303-21;DATA;"]
     for index, point in enumerate(points, 1):
@@ -43,9 +43,25 @@ def test_box_report_flags_the_flipped_face(tmp_path):
     meshes = GeometryBuilder(document).build().faces
     report = build_report(tmp_path / "box.step", document, meshes)
 
-    inconsistent = [face["entity_id"] for face in report["solids"][0]["faces"] if not face["ok"]]
+    solid = report["solids"][0]
+    inconsistent = [face["entity_id"] for face in solid["faces"] if not face["ok"]]
+    assert solid["verdict"] == "inconsistent"
+    assert solid["n_boundary_edges"] == 0
+    assert len(solid["bad_edges"]) == 4
     assert inconsistent == [meshes[2].entity_id]
     json.dumps(report)
+
+
+def test_far_from_origin_box_is_consistent(tmp_path):
+    source = _box_source(low=50, high=70)
+    document = parse_step(source)
+    report = build_report(tmp_path / "far-box.step", document, GeometryBuilder(document).build().faces)
+
+    solid = report["solids"][0]
+    assert any(face["signed_volume_contribution"] < 0 for face in solid["faces"])
+    assert solid["verdict"] == "consistent"
+    assert solid["bad_edges"] == []
+    assert all(face["ok"] for face in solid["faces"])
 
 
 def test_headless_outputs_are_deterministic(tmp_path):
@@ -57,3 +73,23 @@ def test_headless_outputs_are_deterministic(tmp_path):
 
     assert (tmp_path / "first" / "box.json").read_bytes() == (tmp_path / "second" / "box.json").read_bytes()
     assert (tmp_path / "first" / "box.png").read_bytes() == (tmp_path / "second" / "box.png").read_bytes()
+
+
+def test_unbounded_sphere_face_builds_a_closed_consistent_mesh(tmp_path):
+    source = """ISO-10303-21;DATA;
+    #1=CARTESIAN_POINT('',(0.,0.,0.));
+    #2=DIRECTION('',(0.,0.,1.));
+    #3=DIRECTION('',(1.,0.,0.));
+    #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+    #5=SPHERICAL_SURFACE('',#4,2.);
+    #6=ADVANCED_FACE('',(),#5,.T.);
+    #7=CLOSED_SHELL('',(#6));
+    ENDSEC;END-ISO-10303-21;"""
+    document = parse_step(source)
+    meshes = GeometryBuilder(document).build().faces
+    report = build_report(tmp_path / "sphere.step", document, meshes)
+
+    assert len(meshes) == 1
+    assert report["solids"][0]["verdict"] == "consistent"
+    assert report["solids"][0]["n_boundary_edges"] == 0
+    assert report["solids"][0]["total_signed_volume"] > 0
