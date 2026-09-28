@@ -428,6 +428,16 @@ class GeometryBuilder:
             # evaluation exists, the matching control net is the honest
             # preview; a triangulated fallback would falsely cap the loft.
             return None
+        if surface and surface.type_name.upper() == "CONICAL_SURFACE" and len(loops) == 1:
+            apex_fan = self._conical_apex_fan(surface, loops[0])
+            if apex_fan:
+                points, triangles = apex_fan
+                return Mesh(
+                    entity.entity_id, points,
+                    self._oriented_face_triangles(entity, surface, points, triangles),
+                    curved=True,
+                    **self._face_metadata(entity, surface),
+                )
         if surface and surface.type_name.upper() == "CYLINDRICAL_SURFACE" and len(loops) == 2:
             stitched = self._stitch_closed_loops(loops[0], loops[1])
             if stitched:
@@ -480,6 +490,46 @@ class GeometryBuilder:
             self._oriented_face_triangles(entity, surface, points, triangles),
             **self._face_metadata(entity, surface),
         )
+
+    def _conical_apex_fan(
+        self, surface: StepEntity, loop: list[Point3]
+    ) -> tuple[tuple[Point3, ...], tuple[tuple[int, int, int], ...]] | None:
+        """Tessellate a cone sector whose boundary includes its apex.
+
+        Such a sector commonly has two adjacent circular arcs around its rim
+        and two straight generators meeting at the apex.  Treating the arcs
+        as opposite rails of a ruled strip drops the apex and folds the face
+        across itself.  A fan is the natural tessellation for this topology.
+
+        This special case only applies when the conical surface's reference
+        radius is zero and its placement origin is present in the boundary.
+        Frustums and other bounded conical patches continue through the
+        general ruled-surface path.
+        """
+
+        numbers = [_number(argument) for argument in surface.arguments if _number(argument) is not None]
+        if not numbers or abs(numbers[0]) > 1e-12:
+            return None
+        placement_id = next((_ref(argument) for argument in surface.arguments if _ref(argument) is not None), None)
+        placement = self.document.entity(placement_id or -1)
+        if not placement or placement.type_name.upper() != "AXIS2_PLACEMENT_3D":
+            return None
+        origin_id = next((_ref(argument) for argument in placement.arguments if _ref(argument) is not None), None)
+        apex = self._cartesian(origin_id or -1)
+        if apex is None:
+            return None
+
+        extent = max((self._distance(apex, point) for point in loop), default=0.0)
+        tolerance = max(extent * 1e-9, 1e-10)
+        apex_indices = [index for index, point in enumerate(loop) if self._distance(apex, point) <= tolerance]
+        if len(apex_indices) != 1:
+            return None
+
+        apex_index = apex_indices[0]
+        ordered = loop[apex_index:] + loop[:apex_index]
+        points = tuple(ordered)
+        triangles = tuple((0, index, index + 1) for index in range(1, len(points) - 1))
+        return (points, triangles) if triangles else None
 
     def _closed_analytic_surface_mesh(
         self, face: StepEntity, surface: StepEntity | None

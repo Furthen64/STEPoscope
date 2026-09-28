@@ -216,6 +216,19 @@ def test_slot_fixture_builds_curved_edges_and_cylindrical_strips():
     assert all(len(face.triangles) == 36 for face in cylindrical_faces)
 
 
+def test_spindle_cone_sectors_are_fanned_from_their_apices():
+    """Adjacent rim arcs must not be mistaken for opposite ruled rails."""
+    from pathlib import Path
+
+    snapshot = GeometryBuilder(parse_step(Path("examples/spindle1.step").read_text())).build()
+
+    cone_faces = [face for face in snapshot.faces if face.type_name == "CONICAL_SURFACE"]
+    assert len(cone_faces) == 4
+    assert all(face.curved for face in cone_faces)
+    assert all(len(face.triangles) == len(face.points) - 2 for face in cone_faces)
+    assert all(all(0 in triangle for triangle in face.triangles) for face in cone_faces)
+
+
 def test_freecad_surface_curves_and_unordered_face_bounds_are_rendered():
     """FreeCAD wraps model curves and may emit holes before the outer loop."""
     from pathlib import Path
