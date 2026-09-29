@@ -9,7 +9,16 @@ def _render_main(argv: list[str]) -> int:
     import json
     from pathlib import Path
 
-    from .headless import process_file
+    from .headless import CAMERA_DIRECTIONS, process_file
+
+    def views(value: str) -> tuple[str, ...]:
+        requested = tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
+        invalid = [view for view in requested if view not in CAMERA_DIRECTIONS]
+        if not requested or invalid:
+            choices = ", ".join(CAMERA_DIRECTIONS)
+            detail = f"unknown view(s): {', '.join(invalid)}; " if invalid else ""
+            raise argparse.ArgumentTypeError(f"{detail}choose a comma-separated list from: {choices}")
+        return requested
 
     parser = argparse.ArgumentParser(prog="steposcope render", description="Render STEP files and judge raw shell orientation.")
     parser.add_argument("files", nargs="+", help="STEP files, directories, or glob patterns")
@@ -17,7 +26,8 @@ def _render_main(argv: list[str]) -> int:
     parser.add_argument("--width", type=int, default=1200)
     parser.add_argument("--height", type=int, default=900)
     parser.add_argument("--camera", choices=("iso", "front", "top", "right"), default="iso")
-    parser.add_argument("--mode", choices=("normals", "shaded"), default="normals", help="normals colors consistent faces blue and inconsistent faces red; shaded uses neutral material")
+    parser.add_argument("--views", type=views, help="comma-separated views to render (iso,front,top,right); overrides --camera")
+    parser.add_argument("--mode", choices=("normals", "shaded", "faces"), default="normals", help="normals colors consistent faces blue and inconsistent faces red; shaded uses neutral material; faces colors and labels each face by STEP id")
     args = parser.parse_args(argv)
     paths: list[Path] = []
     for item in args.files:
@@ -33,7 +43,7 @@ def _render_main(argv: list[str]) -> int:
         used[stem] = used.get(stem, 0) + 1
         name = stem if used[stem] == 1 else f"{stem}-{used[stem]}"
         try:
-            reports.append(process_file(path, args.out / name, args.width, args.height, args.camera, args.mode))
+            reports.append(process_file(path, args.out / name, args.width, args.height, args.camera, args.mode, args.views))
         except Exception as exc:
             errors.append({"source": str(path), "error": str(exc)})
             print(f"steposcope: {path}: {exc}", file=sys.stderr)

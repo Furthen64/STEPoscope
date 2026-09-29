@@ -2,14 +2,177 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+from colorsys import hsv_to_rgb
 import json
 import math
-from collections import defaultdict
 from pathlib import Path
 
 from .geometry.builder import GeometryBuilder, Mesh, Point3
 from .step.parser import StepDocument
 from .step.values import StepAggregate, StepEnumeration, StepReference
+
+
+CAMERA_DIRECTIONS = {
+    "front": (0, -1, 0),
+    "top": (0, 0, 1),
+    "right": (1, 0, 0),
+    "iso": (1, -1, 1),
+}
+
+
+def _face_color(entity_id: int) -> tuple[float, float, float]:
+    """Return a vivid, stable color derived only from a STEP entity id."""
+
+    # SplitMix64 avoids patterns when a writer allocates face ids at a regular
+    # stride, while integer arithmetic stays predictable for very large ids.
+    mask = (1 << 64) - 1
+    hue_bits = (entity_id + 0x9E3779B97F4A7C15) & mask
+    hue_bits = ((hue_bits ^ (hue_bits >> 30)) * 0xBF58476D1CE4E5B9) & mask
+    hue_bits = ((hue_bits ^ (hue_bits >> 27)) * 0x94D049BB133111EB) & mask
+    hue_bits ^= hue_bits >> 31
+    return hsv_to_rgb(hue_bits / (1 << 64), 0.78, 0.95)
+
+
+def _scene_extent(meshes: list[Mesh]) -> float:
+    points = [point for mesh in meshes for point in mesh.points]
+    if not points:
+        return 1.0
+    return max(
+        max(getattr(point, axis) for point in points) - min(getattr(point, axis) for point in points)
+        for axis in ("x", "y", "z")
+    )
+
+
+def _face_label_position(mesh: Mesh, offset: float) -> tuple[float, float, float] | None:
+    """Find an area-weighted face centroid just above its tessellated surface."""
+
+    weighted_centroid = [0.0, 0.0, 0.0]
+    summed_normal = [0.0, 0.0, 0.0]
+    fallback_normal = (0.0, 0.0, 0.0)
+    fallback_area = 0.0
+    total_area = 0.0
+    samples = []
+    for triangle in mesh.triangles:
+        try:
+            p, q, r = (mesh.points[index] for index in triangle)
+        except IndexError:
+            continue
+        normal = (
+            (q.y - p.y) * (r.z - p.z) - (q.z - p.z) * (r.y - p.y),
+            (q.z - p.z) * (r.x - p.x) - (q.x - p.x) * (r.z - p.z),
+            (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x),
+        )
+        area = math.sqrt(sum(value * value for value in normal))
+        if not math.isfinite(area) or area == 0.0:
+            continue
+        centroid = ((p.x + q.x + r.x) / 3, (p.y + q.y + r.y) / 3, (p.z + q.z + r.z) / 3)
+        samples.append((centroid, normal))
+        for axis in range(3):
+            weighted_centroid[axis] += centroid[axis] * area
+            summed_normal[axis] += normal[axis]
+        total_area += area
+        if area > fallback_area:
+            fallback_area = area
+            fallback_normal = normal
+
+    if total_area == 0.0:
+        return None
+    centroid = tuple(value / total_area for value in weighted_centroid)
+    if mesh.curved:
+        # A curved face's mathematical centroid may lie inside the solid (the
+        # center of a cylinder, for example). Anchor to the tessellated point
+        # nearest that centroid so the label starts on the actual surface.
+        centroid, local_normal = min(
+            samples,
+            key=lambda sample: sum((sample[0][axis] - centroid[axis]) ** 2 for axis in range(3)),
+        )
+        summed_normal = list(local_normal)
+    normal_length = math.sqrt(sum(value * value for value in summed_normal))
+    if normal_length <= total_area * 1e-12:
+        summed_normal = list(fallback_normal)
+        normal_length = fallback_area
+    return tuple(
+        centroid[axis] + offset * summed_normal[axis] / normal_length
+        for axis in range(3)
+    )
+
+
+def _boxes_overlap(first, second) -> bool:
+    return first[0] < second[2] and first[2] > second[0] and first[1] < second[3] and first[3] > second[1]
+
+
+def _label_position(anchor, label_width, label_height, occupied, width, height):
+    """Place a label near its projected anchor without covering another id."""
+
+    centered = (anchor[0] - label_width / 2, anchor[1] - label_height / 2)
+    candidates = [centered]
+    gap = 4.0
+    for radius in range(1, 8):
+        distance = radius * (max(label_width, label_height) + gap)
+        candidates.extend(
+            (centered[0] + dx * distance, centered[1] + dy * distance)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1))
+        )
+    for x, y in candidates:
+        x = max(2.0, min(x, width - label_width - 2.0))
+        y = max(2.0, min(y, height - label_height - 2.0))
+        box = (x, y, x + label_width, y + label_height)
+        if not any(_boxes_overlap(box, other) for other in occupied):
+            return (x, y), box, (x, y) != centered
+    x, y = centered
+    return (x, y), (x, y, x + label_width, y + label_height), True
+
+
+def _add_face_labels(vtk, renderer, specs, width: int, height: int, font_size: int) -> None:
+    """Add stable, collision-aware face labels after the camera is framed."""
+
+    occupied = []
+    for entity_id, anchor, color in sorted(specs):
+        renderer.SetWorldPoint(*anchor, 1.0)
+        renderer.WorldToDisplay()
+        display_anchor = renderer.GetDisplayPoint()
+        label_width = max(24.0, font_size * (0.65 * len(f"#{entity_id}") + 0.5))
+        label_height = font_size * 1.35
+        position, box, displaced = _label_position(
+            display_anchor, label_width, label_height, occupied, width, height
+        )
+        occupied.append(box)
+        renderer.SetDisplayPoint(position[0], position[1], display_anchor[2])
+        renderer.DisplayToWorld()
+        world = renderer.GetWorldPoint()
+        divisor = world[3] or 1.0
+        label_position = tuple(component / divisor for component in world[:3])
+
+        label = vtk.vtkBillboardTextActor3D()
+        label.SetInput(f"#{entity_id}")
+        label.SetPosition(*label_position)
+        label.SetPickable(False)
+        label.SetUseBounds(False)
+        text = label.GetTextProperty()
+        text.SetColor(1.0, 1.0, 1.0)
+        text.SetFontSize(font_size)
+        text.SetBold(True)
+        text.SetBackgroundColor(0.04, 0.05, 0.07)
+        text.SetBackgroundOpacity(0.72)
+        text.SetFrame(True)
+        text.SetFrameColor(*color)
+        text.SetFrameWidth(1)
+        renderer.AddActor(label)
+
+        if displaced:
+            line = vtk.vtkLineSource()
+            line.SetPoint1(*anchor)
+            line.SetPoint2(*label_position)
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputConnection(line.GetOutputPort())
+            leader = vtk.vtkActor()
+            leader.SetMapper(mapper)
+            leader.GetProperty().SetColor(*color)
+            leader.GetProperty().SetLineWidth(1.0)
+            leader.SetPickable(False)
+            leader.SetUseBounds(False)
+            renderer.AddActor(leader)
 
 
 def _face_ids(document: StepDocument, shell) -> list[int]:
@@ -186,6 +349,15 @@ def render_png(meshes: list[Mesh], report: dict, output: Path, width: int, heigh
     window.SetSize(width, height)
     window.SetMultiSamples(0)
     window.AddRenderer(renderer)
+    label_font_size = max(12, min(28, round(min(width, height) / 45)))
+    # A billboard lies in the camera plane, not the face plane. It therefore
+    # needs more than a numerical epsilon of clearance or an oblique surface
+    # will slice through its glyphs even though the anchor itself is visible.
+    # Small images devote a larger share of the viewport to the minimum-size
+    # font, so their labels need proportionally more clearance.
+    offset_factor = max(0.05, 2 * label_font_size / max(min(width, height), 1))
+    label_offset = max(_scene_extent(meshes) * offset_factor, 1e-9)
+    label_specs = []
     for mesh in meshes:
         points = vtk.vtkPoints()
         for point in mesh.points:
@@ -205,6 +377,12 @@ def render_png(meshes: list[Mesh], report: dict, output: Path, width: int, heigh
         actor.SetMapper(mapper)
         if mode == "normals":
             actor.GetProperty().SetColor((0.2, 0.45, 1.0) if verdicts.get(mesh.entity_id, True) else (1.0, 0.15, 0.1))
+        elif mode == "faces":
+            color = _face_color(mesh.entity_id)
+            actor.GetProperty().SetColor(color)
+            label_position = _face_label_position(mesh, label_offset)
+            if label_position is not None:
+                label_specs.append((mesh.entity_id, label_position, color))
         else:
             actor.GetProperty().SetColor(0.72, 0.76, 0.82)
         renderer.AddActor(actor)
@@ -212,8 +390,7 @@ def render_png(meshes: list[Mesh], report: dict, output: Path, width: int, heigh
     cam = renderer.GetActiveCamera()
     focal = cam.GetFocalPoint()
     distance = cam.GetDistance()
-    directions = {"front": (0, -1, 0), "top": (0, 0, 1), "right": (1, 0, 0), "iso": (1, -1, 1)}
-    direction = directions[camera]
+    direction = CAMERA_DIRECTIONS[camera]
     length = math.sqrt(sum(value * value for value in direction))
     cam.SetPosition(*(focal[i] + distance * direction[i] / length for i in range(3)))
     cam.SetViewUp(0, 1, 0 if camera != "front" else 1)
@@ -222,6 +399,7 @@ def render_png(meshes: list[Mesh], report: dict, output: Path, width: int, heigh
     cam.ParallelProjectionOn()
     renderer.ResetCamera()
     renderer.ResetCameraClippingRange()
+    _add_face_labels(vtk, renderer, label_specs, width, height, label_font_size)
     window.Render()
     capture = vtk.vtkWindowToImageFilter()
     capture.SetInput(window)
@@ -235,11 +413,24 @@ def render_png(meshes: list[Mesh], report: dict, output: Path, width: int, heigh
     window.Finalize()
 
 
-def process_file(source: Path, output_base: Path, width: int, height: int, camera: str, mode: str) -> dict:
+def process_file(
+    source: Path,
+    output_base: Path,
+    width: int,
+    height: int,
+    camera: str,
+    mode: str,
+    views: tuple[str, ...] | None = None,
+) -> dict:
     document = StepDocument.from_file(source)
     snapshot = GeometryBuilder(document).build()
     report = build_report(source, document, snapshot.faces)
     output_base.parent.mkdir(parents=True, exist_ok=True)
     output_base.with_suffix(".json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    render_png(snapshot.faces, report, output_base.with_suffix(".png"), width, height, camera, mode)
+    if views is None:
+        render_png(snapshot.faces, report, output_base.with_suffix(".png"), width, height, camera, mode)
+    else:
+        for view in views:
+            view_base = output_base.with_name(f"{output_base.name}-{view}")
+            render_png(snapshot.faces, report, view_base.with_suffix(".png"), width, height, view, mode)
     return report

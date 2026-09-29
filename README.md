@@ -47,6 +47,7 @@ Generate deterministic JSON reports and PNG previews without opening gui:
 ```sh
 uv run steposcope render model.step --out reports
 uv run python -m step_explorer render 'models/**/*.step' --out reports --camera iso --mode normals
+uv run steposcope render model.step --out reports --mode faces --views iso,front,top,right
 ```
 
 For a quick local smoke test, run the bundled launcher. It renders `slot1.STEP`
@@ -58,15 +59,19 @@ to `temp/headless_once` by default:
 HEADLESS_OUT=/tmp/steposcope ./headless_once.sh path/to/model.step
 ```
 
-The command accepts files, directories, and glob patterns. It writes one JSON
-report and PNG per input plus `summary.json`. Exit status 0 means every rendered
-shell is consistent, 1 means at least one shell is inconsistent, open, or
-unreliable, and 2 means an input could not be read or parsed. The judge checks
-that every mesh edge has two incident triangles, that both triangles traverse
-the edge in opposite directions, and that the closed shell has positive signed
-volume. The per-face signed-volume contribution remains diagnostic and does not
-determine the verdict. In `normals` mode, blue faces pass these shell checks and
-red faces do not.
+The command accepts files, directories, and glob patterns. By default it writes
+one JSON report and PNG per input plus `summary.json`. `--views` instead writes
+one `<name>-<view>.png` for each requested camera angle. Exit status 0 means
+every rendered shell is consistent, 1 means at least one shell is inconsistent,
+open, or unreliable, and 2 means an input could not be read or parsed. The judge
+checks that every mesh edge has two incident triangles, that both triangles
+traverse the edge in opposite directions, and that the closed shell has positive
+signed volume. The per-face signed-volume contribution remains diagnostic and
+does not determine the verdict. In `normals` mode, blue faces pass these shell
+checks and red faces do not. In `faces` mode, each face gets a stable color and
+its STEP `#id` is drawn at its centroid. Colors are only a grouping aid: on
+models with more than roughly a dozen faces, use the labels to distinguish
+similar hues.
 
 The judge applies `ADVANCED_FACE` sense analytically to plane, cylinder, cone,
 sphere, and torus meshes. Each face records `sense_applied` in JSON. B-spline

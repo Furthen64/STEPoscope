@@ -1,7 +1,8 @@
 import json
 
-from step_explorer.headless import build_report, process_file
-from step_explorer.geometry.builder import GeometryBuilder
+from step_explorer.headless import _face_color, _face_label_position, build_report, process_file, render_png
+from step_explorer.geometry.builder import GeometryBuilder, Mesh, Point3
+from step_explorer.main import _render_main
 from step_explorer.step.parser import parse_step
 
 
@@ -73,6 +74,58 @@ def test_headless_outputs_are_deterministic(tmp_path):
 
     assert (tmp_path / "first" / "box.json").read_bytes() == (tmp_path / "second" / "box.json").read_bytes()
     assert (tmp_path / "first" / "box.png").read_bytes() == (tmp_path / "second" / "box.png").read_bytes()
+
+
+def test_face_colors_are_distinct_stable_and_render_deterministically(tmp_path):
+    source = tmp_path / "box.step"
+    source.write_text(_box_source(), encoding="utf-8")
+    meshes = GeometryBuilder(parse_step(_box_source())).build().faces
+
+    colors = [_face_color(mesh.entity_id) for mesh in meshes]
+    assert len(set(colors)) == len(colors)
+    assert _face_color(meshes[0].entity_id) == colors[0]
+    assert _face_color(100) != _face_color(101)
+
+    process_file(source, tmp_path / "first" / "box", 160, 120, "iso", "faces")
+    process_file(source, tmp_path / "second" / "box", 160, 120, "iso", "faces")
+
+    assert (tmp_path / "first" / "box.png").read_bytes() == (tmp_path / "second" / "box.png").read_bytes()
+
+
+def test_views_flag_writes_named_views_and_default_stays_single_view(tmp_path):
+    source = tmp_path / "box.step"
+    source.write_text(_box_source(), encoding="utf-8")
+
+    views_out = tmp_path / "views"
+    assert _render_main([
+        str(source), "--out", str(views_out), "--width", "160", "--height", "120",
+        "--mode", "faces", "--views", "iso,front,top,right",
+    ]) == 0
+    assert {path.name for path in views_out.glob("*.png")} == {
+        "box-iso.png", "box-front.png", "box-top.png", "box-right.png",
+    }
+    assert not (views_out / "box.png").exists()
+
+    default_out = tmp_path / "default"
+    assert _render_main([
+        str(source), "--out", str(default_out), "--width", "160", "--height", "120",
+    ]) == 0
+    assert {path.name for path in default_out.glob("*.png")} == {"box.png"}
+
+
+def test_faces_mode_renders_a_large_entity_id_and_skips_degenerate_labels(tmp_path):
+    large_id = 10**30 + 123
+    mesh = Mesh(
+        large_id,
+        (Point3(-1, -1, 0), Point3(1, -1, 0), Point3(1, 1, 0), Point3(-1, 1, 0)),
+        ((0, 1, 2), (0, 2, 3)),
+    )
+    report = {"solids": [{"faces": [{"entity_id": large_id, "ok": True}]}]}
+
+    render_png([mesh], report, tmp_path / "large.png", 160, 120, "top", "faces")
+
+    assert (tmp_path / "large.png").stat().st_size > 0
+    assert _face_label_position(Mesh(large_id, mesh.points, ()), 0.1) is None
 
 
 def test_unbounded_sphere_face_builds_a_closed_consistent_mesh(tmp_path):
