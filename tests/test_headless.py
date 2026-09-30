@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from step_explorer.headless import _face_color, _face_label_position, build_report, process_file, render_png
 from step_explorer.geometry.builder import GeometryBuilder, Mesh, Point3
 from step_explorer.main import _render_main
@@ -146,3 +148,18 @@ def test_unbounded_sphere_face_builds_a_closed_consistent_mesh(tmp_path):
     assert report["solids"][0]["verdict"] == "consistent"
     assert report["solids"][0]["n_boundary_edges"] == 0
     assert report["solids"][0]["total_signed_volume"] > 0
+
+
+@pytest.mark.parametrize("fixture_name", ("cylindercut1", "cylindercut2", "cylindercut3"))
+def test_cylindercut_fixtures_build_closed_consistent_shells(fixture_name):
+    from pathlib import Path
+
+    path = Path(f"examples/{fixture_name}/{fixture_name}.step")
+    document = parse_step(path.read_text())
+    report = build_report(path, document, GeometryBuilder(document).build().faces)
+
+    assert len(report["solids"]) == 1
+    solid = report["solids"][0]
+    assert solid["verdict"] == "consistent"
+    assert solid["n_boundary_edges"] == 0
+    assert solid["n_inconsistent"] == 0

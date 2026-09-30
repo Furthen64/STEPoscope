@@ -1,0 +1,98 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION (( 'STEP AP203' ),
+    '1' );
+FILE_NAME ('cylindercut1.step',
+    '2026-09-08T00:00:00',
+    ( '' ),
+    ( '' ),
+    'SteppifySOLID task20',
+    'hand-written AP203 emitter',
+    '' );
+FILE_SCHEMA (( 'CONFIG_CONTROL_DESIGN' ));
+ENDSEC;
+
+DATA;
+#1 = CARTESIAN_POINT( 'NONE', (0, 0, 0) ) ;
+#2 = DIRECTION( 'NONE', (0, 1, 0) ) ;
+#3 = DIRECTION( 'NONE', (0, 0, 1) ) ;
+#4 = AXIS2_PLACEMENT_3D( 'NONE', #1, #2, #3 ) ;
+#5 = PLANE( 'NONE', #4 ) ;
+#6 = CARTESIAN_POINT( 'NONE', (-30, 0, 0) ) ;
+#7 = VERTEX_POINT( 'NONE', #6 ) ;
+#8 = CARTESIAN_POINT( 'NONE', (30, 0, 3.67394039744206e-15) ) ;
+#9 = VERTEX_POINT( 'NONE', #8 ) ;
+#10 = DIRECTION( 'NONE', (-1, 0, 0) ) ;
+#11 = AXIS2_PLACEMENT_3D( 'NONE', #1, #2, #10 ) ;
+#12 = CIRCLE( 'NONE', #11, 30 ) ;
+#13 = EDGE_CURVE( 'NONE', #7, #9, #12, .T. ) ;
+#14 = EDGE_CURVE( 'NONE', #9, #7, #12, .T. ) ;
+#15 = ORIENTED_EDGE( 'NONE', *, *, #14, .F. ) ;
+#16 = ORIENTED_EDGE( 'NONE', *, *, #13, .F. ) ;
+#17 = EDGE_LOOP( 'NONE', (#15, #16) ) ;
+#18 = FACE_OUTER_BOUND( 'NONE', #17, .T. ) ;
+#19 = ADVANCED_FACE( 'NONE', (#18), #5, .F. ) ;
+#20 = CARTESIAN_POINT( 'NONE', (0, 30, 0) ) ;
+#21 = DIRECTION( 'NONE', (0, -1, 0) ) ;
+#22 = DIRECTION( 'NONE', (0, 0, -1) ) ;
+#23 = AXIS2_PLACEMENT_3D( 'NONE', #20, #21, #22 ) ;
+#24 = CYLINDRICAL_SURFACE( 'NONE', #23, 30 ) ;
+#25 = CARTESIAN_POINT( 'NONE', (-30.000000000000004, 21.90475096594018, 0) ) ;
+#26 = VERTEX_POINT( 'NONE', #25 ) ;
+#27 = CARTESIAN_POINT( 'NONE', (30.000000000000004, 27.423423165110307, 3.67394039744206e-15) ) ;
+#28 = VERTEX_POINT( 'NONE', #27 ) ;
+#29 = CARTESIAN_POINT( 'NONE', (0, 24.664087065525244, 0) ) ;
+#30 = DIRECTION( 'NONE', (-0.0915912581902827, 0.9957966867905923, 0) ) ;
+#31 = DIRECTION( 'NONE', (-0.9957966867905924, -0.0915912581902827, 0) ) ;
+#32 = AXIS2_PLACEMENT_3D( 'NONE', #29, #30, #31 ) ;
+#33 = ELLIPSE( 'NONE', #32, 30.12663166884863, 30 ) ;
+#34 = EDGE_CURVE( 'NONE', #26, #28, #33, .T. ) ;
+#35 = EDGE_CURVE( 'NONE', #28, #26, #33, .T. ) ;
+#36 = ORIENTED_EDGE( 'NONE', *, *, #35, .F. ) ;
+#37 = VECTOR( 'NONE', #21, 1 ) ;
+#38 = LINE( 'NONE', #27, #37 ) ;
+#39 = EDGE_CURVE( 'NONE', #28, #9, #38, .T. ) ;
+#40 = ORIENTED_EDGE( 'NONE', *, *, #39, .T. ) ;
+#41 = ORIENTED_EDGE( 'NONE', *, *, #14, .T. ) ;
+#42 = VECTOR( 'NONE', #2, 1 ) ;
+#43 = LINE( 'NONE', #6, #42 ) ;
+#44 = EDGE_CURVE( 'NONE', #7, #26, #43, .T. ) ;
+#45 = ORIENTED_EDGE( 'NONE', *, *, #44, .T. ) ;
+#46 = EDGE_LOOP( 'NONE', (#36, #40, #41, #45) ) ;
+#47 = FACE_OUTER_BOUND( 'NONE', #46, .T. ) ;
+#48 = ORIENTED_EDGE( 'NONE', *, *, #34, .F. ) ;
+#49 = ORIENTED_EDGE( 'NONE', *, *, #44, .F. ) ;
+#50 = ORIENTED_EDGE( 'NONE', *, *, #13, .T. ) ;
+#51 = ORIENTED_EDGE( 'NONE', *, *, #39, .F. ) ;
+#52 = EDGE_LOOP( 'NONE', (#48, #49, #50, #51) ) ;
+#53 = FACE_OUTER_BOUND( 'NONE', #52, .T. ) ;
+#54 = ADVANCED_FACE( 'NONE', (#47), #24, .T. ) ;
+#55 = ADVANCED_FACE( 'NONE', (#53), #24, .T. ) ;
+#56 = CARTESIAN_POINT( 'NONE', (-37.397369389238676, 21.22435668601712, 150) ) ;
+#57 = AXIS2_PLACEMENT_3D( 'NONE', #56, #30, #31 ) ;
+#58 = PLANE( 'NONE', #57 ) ;
+#59 = ORIENTED_EDGE( 'NONE', *, *, #34, .T. ) ;
+#60 = ORIENTED_EDGE( 'NONE', *, *, #35, .T. ) ;
+#61 = EDGE_LOOP( 'NONE', (#59, #60) ) ;
+#62 = FACE_OUTER_BOUND( 'NONE', #61, .T. ) ;
+#63 = ADVANCED_FACE( 'NONE', (#62), #58, .T. ) ;
+#64 = CLOSED_SHELL( 'NONE', (#19, #54, #55, #63) ) ;
+#65 = MANIFOLD_SOLID_BREP( 'cylindercut1', #64 ) ;
+#66 = APPLICATION_CONTEXT( 'configuration controlled 3d designs of mechanical parts and assemblies' ) ;
+#67 = APPLICATION_PROTOCOL_DEFINITION( 'international standard', 'config_control_design', 1994, #66 ) ;
+#68 = MECHANICAL_CONTEXT( 'NONE', #66, 'mechanical' ) ;
+#69 = DESIGN_CONTEXT( 'detailed design', #66, 'design' ) ;
+#70 = PRODUCT( 'cylindercut1', 'cylindercut1', '', (#68) ) ;
+#71 = PRODUCT_RELATED_PRODUCT_CATEGORY( 'detail', '', (#70) ) ;
+#72 = PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE( 'ANY', '', #70, .NOT_KNOWN. ) ;
+#73 = PRODUCT_DEFINITION( 'UNKNOWN', '', #72, #69 ) ;
+#74 = PRODUCT_DEFINITION_SHAPE( 'NONE', 'NONE', #73 ) ;
+#75 =( LENGTH_UNIT( ) NAMED_UNIT( * ) SI_UNIT( .MILLI., .METRE. ) );
+#76 =( NAMED_UNIT( * ) PLANE_ANGLE_UNIT( ) SI_UNIT( $, .RADIAN. ) );
+#77 =( NAMED_UNIT( * ) SI_UNIT( $, .STERADIAN. ) SOLID_ANGLE_UNIT( ) );
+#78 = UNCERTAINTY_MEASURE_WITH_UNIT( LENGTH_MEASURE( 1.E-5 ), #75, 'distance_accuracy_value', 'NONE' ) ;
+#79 =( GEOMETRIC_REPRESENTATION_CONTEXT( 3 ) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT( ( #78 ) ) GLOBAL_UNIT_ASSIGNED_CONTEXT( ( #75, #76, #77 ) ) );
+#80 = ADVANCED_BREP_SHAPE_REPRESENTATION( 'cylindercut1', ( #65 ), #79 ) ;
+#81 = SHAPE_DEFINITION_REPRESENTATION( #74, #80 ) ;
+ENDSEC;
+END-ISO-10303-21;

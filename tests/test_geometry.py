@@ -204,6 +204,54 @@ def test_circle_edge_is_sampled_as_an_arc():
     assert max(point.y for point in edge.points) == 1.0
 
 
+def test_ellipse_edge_is_sampled_as_an_arc():
+    source = """ISO-10303-21;DATA;
+    #1=CARTESIAN_POINT('',(0.,0.,0.));
+    #2=DIRECTION('',(0.,0.,1.));
+    #3=DIRECTION('',(1.,0.,0.));
+    #4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+    #5=ELLIPSE('',#4,2.,1.);
+    #6=CARTESIAN_POINT('',(2.,0.,0.));
+    #7=CARTESIAN_POINT('',(-2.,0.,0.));
+    #8=VERTEX_POINT('',#6);
+    #9=VERTEX_POINT('',#7);
+    #10=EDGE_CURVE('',#8,#9,#5,.T.);
+    ENDSEC;END-ISO-10303-21;"""
+
+    edge = GeometryBuilder(parse_step(source)).build().polylines[0]
+
+    assert len(edge.points) == 19
+    assert edge.points[0] == Point3(2.0, 0.0, 0.0)
+    assert edge.points[-1] == Point3(-2.0, 0.0, 0.0)
+    assert max(point.y for point in edge.points) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "slanted_cap_id"),
+    (("cylindercut1", 63), ("cylindercut2", 64), ("cylindercut3", 64)),
+)
+def test_cylindercut_fixtures_build_both_cylinder_halves_and_slanted_cap(
+    fixture_name, slanted_cap_id
+):
+    from pathlib import Path
+
+    snapshot = GeometryBuilder(
+        parse_step(Path(f"examples/{fixture_name}/{fixture_name}.step").read_text())
+    ).build()
+
+    assert len(snapshot.faces) == 4
+    cylindrical_faces = [face for face in snapshot.faces if face.type_name == "CYLINDRICAL_SURFACE"]
+    assert len(cylindrical_faces) == 2
+    assert all(face.curved for face in cylindrical_faces)
+    assert all(len(face.points) == 38 for face in cylindrical_faces)
+    assert all(len(face.triangles) == 36 for face in cylindrical_faces)
+
+    slanted_cap = next(face for face in snapshot.faces if face.entity_id == slanted_cap_id)
+    assert slanted_cap.type_name == "PLANE"
+    assert len(slanted_cap.points) == 36
+    assert len(slanted_cap.triangles) == 34
+
+
 def test_slot_fixture_builds_curved_edges_and_cylindrical_strips():
     from pathlib import Path
 

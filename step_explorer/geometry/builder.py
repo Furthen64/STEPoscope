@@ -295,6 +295,18 @@ class GeometryBuilder:
             )
             if sampled:
                 return sampled
+        if len(points) == 2 and curve and curve.type_name.upper() == "ELLIPSE":
+            same_sense = next(
+                (item for item in reversed(entity.arguments) if isinstance(item, StepEnumeration)), None
+            )
+            sampled = self._ellipse_arc(
+                curve,
+                points[0],
+                points[1],
+                same_sense is None or same_sense.value.upper() == "T",
+            )
+            if sampled:
+                return sampled
         return points
 
     def _circle_arc(
@@ -346,6 +358,73 @@ class GeometryBuilder:
                 )
             )
         # Preserve exact topology vertices, avoiding tiny seams from trigonometry.
+        result[0], result[-1] = start, end
+        return tuple(result)
+
+    def _ellipse_arc(
+        self, ellipse: StepEntity, start: Point3, end: Point3, same_sense: bool
+    ) -> tuple[Point3, ...]:
+        """Sample a trimmed STEP ellipse in its placement coordinate system."""
+
+        placement_id = next((_ref(item) for item in ellipse.arguments if _ref(item) is not None), None)
+        radii = [_number(item) for item in ellipse.arguments if _number(item) is not None]
+        placement = self.document.entity(placement_id or -1)
+        if (
+            not placement
+            or placement.type_name.upper() != "AXIS2_PLACEMENT_3D"
+            or len(radii) < 2
+            or radii[0] <= 0.0
+            or radii[1] <= 0.0
+        ):
+            return ()
+        refs = [_ref(item) for item in placement.arguments if _ref(item) is not None]
+        if not refs:
+            return ()
+        center = self._cartesian(refs[0])
+        normal = self._direction(refs[1]) if len(refs) > 1 else (0.0, 0.0, 1.0)
+        x_axis = self._direction(refs[2]) if len(refs) > 2 else None
+        if center is None or normal is None:
+            return ()
+        normal = self._normalized(normal)
+        if x_axis is None:
+            seed = (1.0, 0.0, 0.0) if abs(normal[0]) < 0.9 else (0.0, 1.0, 0.0)
+            x_axis = self._normalized(self._cross(seed, normal))
+        else:
+            x_axis = self._normalized(x_axis)
+        y_axis = self._normalized(self._cross(normal, x_axis)) if normal and x_axis else None
+        if not normal or not x_axis or not y_axis:
+            return ()
+
+        major_radius, minor_radius = radii[:2]
+
+        def angle(point: Point3) -> float:
+            delta = (point.x - center.x, point.y - center.y, point.z - center.z)
+            return math.atan2(
+                self._dot(delta, y_axis) / minor_radius,
+                self._dot(delta, x_axis) / major_radius,
+            )
+
+        start_angle = angle(start)
+        sweep = (angle(end) - start_angle) % (2.0 * math.pi)
+        # As with a circle, coincident trim vertices denote one full ellipse.
+        if sweep < 1e-9:
+            sweep = 2.0 * math.pi
+        if not same_sense:
+            sweep -= 2.0 * math.pi
+        segments = max(4, int(math.ceil(abs(sweep) / (math.pi / 18.0))))
+        result = []
+        for index in range(segments + 1):
+            parameter = start_angle + sweep * index / segments
+            result.append(
+                Point3(
+                    center.x + major_radius * math.cos(parameter) * x_axis[0]
+                    + minor_radius * math.sin(parameter) * y_axis[0],
+                    center.y + major_radius * math.cos(parameter) * x_axis[1]
+                    + minor_radius * math.sin(parameter) * y_axis[1],
+                    center.z + major_radius * math.cos(parameter) * x_axis[2]
+                    + minor_radius * math.sin(parameter) * y_axis[2],
+                )
+            )
         result[0], result[-1] = start, end
         return tuple(result)
 

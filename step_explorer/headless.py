@@ -405,16 +405,22 @@ def render_png(
     output: Path,
     width: int,
     height: int,
-    camera: str,
+camera: str,
     mode: str,
     max_labels: int = 0,
+    fit_box: tuple[float, float, float, float, float, float] | None = None,
 ) -> None:
     """Render one view to PNG.
 
     `max_labels` caps the `faces`-mode labels, keeping the largest-area faces. Drawing a
-    VTK text actor is expensive -- about 10ms each at this glyph size -- so a dense loft
+    VTK text actor is expensive -- about 10ms each at that glyph size -- so a dense loft
     spends ~35s per view drawing labels that are ~10px tall, mutually overlapping and
     unreadable anyway. 0 (the default) means no cap, i.e. current behaviour.
+
+    `fit_box` overrides the camera framing. By default each render calls
+    `ResetCamera()` on its own actors, so every file is scaled to fill the frame --
+    which makes a uniform size difference between two files completely invisible.
+    Pass the same box for every file in a comparison and the camera becomes a ruler.
     """
     import vtkmodules.all as vtk
 
@@ -426,6 +432,19 @@ def render_png(
     window.SetSize(width, height)
     window.SetMultiSamples(0)
     window.AddRenderer(renderer)
+    if fit_box is not None:
+        # A visible actor is required: ResetCamera ignores invisible geometry, so
+        # hiding this box would silently restore the per-file auto-fit.
+        outline = vtk.vtkOutlineSource()
+        outline.SetBounds(*fit_box)
+        outline_mapper = vtk.vtkPolyDataMapper()
+        outline_mapper.SetInputConnection(outline.GetOutputPort())
+        outline_actor = vtk.vtkActor()
+        outline_actor.SetMapper(outline_mapper)
+        outline_actor.GetProperty().SetColor(0.45, 0.50, 0.58)
+        outline_actor.GetProperty().SetLineWidth(1.0)
+        outline_actor.GetProperty().SetOpacity(0.55)
+        renderer.AddActor(outline_actor)
     label_font_size = max(12, min(28, round(min(width, height) / 45)))
     # A billboard lies in the camera plane, not the face plane. It therefore
     # needs more than a numerical epsilon of clearance or an oblique surface
@@ -507,6 +526,7 @@ def process_file(
     views: tuple[str, ...] | None = None,
     progress=None,
     max_labels: int = 0,
+    fit_box: tuple[float, float, float, float, float, float] | None = None,
 ) -> dict:
     # Each of these stages can take minutes on a heavy file, and a silent run is
     # indistinguishable from a hung one -- so say what is happening and how long
@@ -550,7 +570,7 @@ def process_file(
         rep.stage(f"rendering {len(views_to_render)} view(s) [{mode}{cap}]")
     t5 = time.time()
     for index, (view, png) in enumerate(views_to_render, start=1):
-        render_png(snapshot.faces, report, png, width, height, view, mode, max_labels=max_labels)
+        render_png(snapshot.faces, report, png, width, height, view, mode, max_labels=max_labels, fit_box=fit_box)
         if live:
             rep.item(index, len(views_to_render), f"view {view}")
     if live:

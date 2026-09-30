@@ -35,7 +35,21 @@ def _render_main(argv: list[str]) -> int:
                         help="cap faces-mode labels to the N largest faces (0 = no cap). "
                              "Text actors dominate the render on dense files: ~35s/view for "
                              "3500 labels versus ~5s for 400.")
+    parser.add_argument("--fit-box", metavar="X0,Y0,Z0,X1,Y1,Z1", default=None,
+                        help="frame the camera on these world bounds instead of each file's own. "
+                             "Pass the SAME box for every file in a comparison: the default "
+                             "per-file auto-fit rescales every render to fill the frame, so a "
+                             "uniform size difference between two files is invisible.")
     args = parser.parse_args(argv)
+    fit_box = None
+    if args.fit_box:
+        try:
+            values = tuple(float(v) for v in args.fit_box.split(","))
+        except ValueError:
+            parser.error(f"--fit-box must be 6 comma-separated numbers, got {args.fit_box!r}")
+        if len(values) != 6 or not all(values[i] < values[i + 3] for i in range(3)):
+            parser.error(f"--fit-box needs X0<X1, Y0<Y1, Z0<Z1; got {args.fit_box!r}")
+        fit_box = values
     paths: list[Path] = []
     for item in args.files:
         expanded = [Path(path) for path in glob.glob(item, recursive=True)] or [Path(item)]
@@ -56,7 +70,7 @@ def _render_main(argv: list[str]) -> int:
         progress.end_item()
         progress.stage(f"[{index}/{total}] {path.name}")
         try:
-            reports.append(process_file(path, args.out / name, args.width, args.height, args.camera, args.mode, args.views, progress=progress, max_labels=args.max_labels))
+            reports.append(process_file(path, args.out / name, args.width, args.height, args.camera, args.mode, args.views, progress=progress, max_labels=args.max_labels, fit_box=fit_box))
         except Exception as exc:
             errors.append({"source": str(path), "error": str(exc)})
             print(f"steposcope: {path}: {exc}", file=sys.stderr)
