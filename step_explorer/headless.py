@@ -6,6 +6,7 @@ from collections import defaultdict
 from colorsys import hsv_to_rgb
 import json
 import math
+import time
 from pathlib import Path
 
 from .geometry.builder import GeometryBuilder, Mesh, Point3
@@ -42,6 +43,24 @@ def _scene_extent(meshes: list[Mesh]) -> float:
         max(getattr(point, axis) for point in points) - min(getattr(point, axis) for point in points)
         for axis in ("x", "y", "z")
     )
+
+
+def _mesh_area(mesh: Mesh) -> float:
+    """Total tessellated area, used to decide which faces are worth labelling."""
+    total = 0.0
+    points = mesh.points
+    for triangle in mesh.triangles:
+        try:
+            p, q, r = (points[index] for index in triangle)
+        except IndexError:
+            continue
+        ux, uy, uz = q.x - p.x, q.y - p.y, q.z - p.z
+        vx, vy, vz = r.x - p.x, r.y - p.y, r.z - p.z
+        cx = uy * vz - uz * vy
+        cy = uz * vx - ux * vz
+        cz = ux * vy - uy * vx
+        total += 0.5 * math.sqrt(cx * cx + cy * cy + cz * cz)
+    return total
 
 
 def _face_label_position(mesh: Mesh, offset: float) -> tuple[float, float, float] | None:
@@ -102,6 +121,48 @@ def _boxes_overlap(first, second) -> bool:
     return first[0] < second[2] and first[2] > second[0] and first[1] < second[3] and first[3] > second[1]
 
 
+class _LabelPlacer:
+    """Tracks placed label boxes and answers 'does this one hit any of them?'.
+
+    The original answer was a linear scan of every box placed so far, asked once
+    per candidate position per label: O(labels^2) with up to 57 candidates each.
+    On a 3537-face loft that is a few hundred million box tests, and it dominated
+    the whole `faces` render -- 170s of a 178s run, against 0.4s for `normals`.
+
+    Bucketing by cell keeps the answer identical: with the cell at least as large
+    as the biggest label, two boxes can only overlap if they share a cell, so the
+    lookup only has to consider neighbours. Same placement, same order, no
+    different output -- just not quadratic.
+    """
+
+    def __init__(self, cell: float = 64.0) -> None:
+        self.cell = max(1.0, float(cell))
+        self._buckets: dict[tuple[int, int], list[tuple]] = {}
+
+    def _cells(self, box: tuple[float, float, float, float]):
+        x0 = int(box[0] // self.cell)
+        y0 = int(box[1] // self.cell)
+        x1 = int(box[2] // self.cell)
+        y1 = int(box[3] // self.cell)
+        for cx in range(x0, x1 + 1):
+            for cy in range(y0, y1 + 1):
+                yield cx, cy
+
+    def overlaps(self, box: tuple[float, float, float, float]) -> bool:
+        for key in self._cells(box):
+            for other in self._buckets.get(key, ()):
+                if _boxes_overlap(box, other):
+                    return True
+        return False
+
+    def add(self, box: tuple[float, float, float, float]) -> None:
+        for key in self._cells(box):
+            self._buckets.setdefault(key, []).append(box)
+
+    def __len__(self) -> int:
+        return sum(len(v) for v in self._buckets.values())
+
+
 def _label_position(anchor, label_width, label_height, occupied, width, height):
     """Place a label near its projected anchor without covering another id."""
 
@@ -118,7 +179,7 @@ def _label_position(anchor, label_width, label_height, occupied, width, height):
         x = max(2.0, min(x, width - label_width - 2.0))
         y = max(2.0, min(y, height - label_height - 2.0))
         box = (x, y, x + label_width, y + label_height)
-        if not any(_boxes_overlap(box, other) for other in occupied):
+        if not occupied.overlaps(box):
             return (x, y), box, (x, y) != centered
     x, y = centered
     return (x, y), (x, y, x + label_width, y + label_height), True
@@ -127,7 +188,7 @@ def _label_position(anchor, label_width, label_height, occupied, width, height):
 def _add_face_labels(vtk, renderer, specs, width: int, height: int, font_size: int) -> None:
     """Add stable, collision-aware face labels after the camera is framed."""
 
-    occupied = []
+    occupied = _LabelPlacer(cell=max(48.0, font_size * 12.0))
     for entity_id, anchor, color in sorted(specs):
         renderer.SetWorldPoint(*anchor, 1.0)
         renderer.WorldToDisplay()
@@ -137,7 +198,7 @@ def _add_face_labels(vtk, renderer, specs, width: int, height: int, font_size: i
         position, box, displaced = _label_position(
             display_anchor, label_width, label_height, occupied, width, height
         )
-        occupied.append(box)
+        occupied.add(box)
         renderer.SetDisplayPoint(position[0], position[1], display_anchor[2])
         renderer.DisplayToWorld()
         world = renderer.GetWorldPoint()
@@ -338,7 +399,23 @@ def build_report(source: Path, document: StepDocument, meshes: list[Mesh]) -> di
     return {"source": str(source), "solids": solids}
 
 
-def render_png(meshes: list[Mesh], report: dict, output: Path, width: int, height: int, camera: str, mode: str) -> None:
+def render_png(
+    meshes: list[Mesh],
+    report: dict,
+    output: Path,
+    width: int,
+    height: int,
+    camera: str,
+    mode: str,
+    max_labels: int = 0,
+) -> None:
+    """Render one view to PNG.
+
+    `max_labels` caps the `faces`-mode labels, keeping the largest-area faces. Drawing a
+    VTK text actor is expensive -- about 10ms each at this glyph size -- so a dense loft
+    spends ~35s per view drawing labels that are ~10px tall, mutually overlapping and
+    unreadable anyway. 0 (the default) means no cap, i.e. current behaviour.
+    """
     import vtkmodules.all as vtk
 
     verdicts = {face["entity_id"]: face["ok"] for solid in report["solids"] for face in solid["faces"]}
@@ -358,6 +435,7 @@ def render_png(meshes: list[Mesh], report: dict, output: Path, width: int, heigh
     offset_factor = max(0.05, 2 * label_font_size / max(min(width, height), 1))
     label_offset = max(_scene_extent(meshes) * offset_factor, 1e-9)
     label_specs = []
+    label_areas = []
     for mesh in meshes:
         points = vtk.vtkPoints()
         for point in mesh.points:
@@ -383,6 +461,7 @@ def render_png(meshes: list[Mesh], report: dict, output: Path, width: int, heigh
             label_position = _face_label_position(mesh, label_offset)
             if label_position is not None:
                 label_specs.append((mesh.entity_id, label_position, color))
+                label_areas.append(_mesh_area(mesh))
         else:
             actor.GetProperty().SetColor(0.72, 0.76, 0.82)
         renderer.AddActor(actor)
@@ -399,6 +478,11 @@ def render_png(meshes: list[Mesh], report: dict, output: Path, width: int, heigh
     cam.ParallelProjectionOn()
     renderer.ResetCamera()
     renderer.ResetCameraClippingRange()
+    if max_labels and len(label_specs) > max_labels:
+        # Keep the biggest faces: a truncated label set is only useful if the labels
+        # that survive are the ones you would actually look for.
+        keep = sorted(range(len(label_specs)), key=lambda i: label_areas[i], reverse=True)[:max_labels]
+        label_specs = [label_specs[i] for i in sorted(keep)]
     _add_face_labels(vtk, renderer, label_specs, width, height, label_font_size)
     window.Render()
     capture = vtk.vtkWindowToImageFilter()
@@ -421,16 +505,55 @@ def process_file(
     camera: str,
     mode: str,
     views: tuple[str, ...] | None = None,
+    progress=None,
+    max_labels: int = 0,
 ) -> dict:
+    # Each of these stages can take minutes on a heavy file, and a silent run is
+    # indistinguishable from a hung one -- so say what is happening and how long
+    # it took. `progress` is None (silent) unless the caller asks for reporting.
+    rep = progress
+    live = rep is not None and rep.enabled
+
+    if live:
+        rep.stage(f"reading {source.name}")
+    t0 = time.time()
     document = StepDocument.from_file(source)
-    snapshot = GeometryBuilder(document).build()
+    t1 = time.time()
+    if live:
+        rep.done(f"read {source.name} ({len(document.entities)} entities)", t1 - t0)
+
+        rep.stage("tessellating")
+    t2 = time.time()
+    snapshot = GeometryBuilder(document).build(progress=rep)
+    t3 = time.time()
+    if live:
+        rep.done(f"tessellated {len(snapshot.faces)} faces", t3 - t2)
+
+        rep.stage("judging shell")
     report = build_report(source, document, snapshot.faces)
+    t4 = time.time()
+    if live:
+        rep.done("judged", t4 - t3)
+        rep.end_item()
+
     output_base.parent.mkdir(parents=True, exist_ok=True)
     output_base.with_suffix(".json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if views is None:
-        render_png(snapshot.faces, report, output_base.with_suffix(".png"), width, height, camera, mode)
+        views_to_render = [(camera, output_base.with_suffix(".png"))]
     else:
-        for view in views:
-            view_base = output_base.with_name(f"{output_base.name}-{view}")
-            render_png(snapshot.faces, report, view_base.with_suffix(".png"), width, height, view, mode)
+        views_to_render = [
+            (view, output_base.with_name(f"{output_base.name}-{view}").with_suffix(".png"))
+            for view in views
+        ]
+    if live:
+        cap = f", max {max_labels} labels" if max_labels and mode == "faces" else ""
+        rep.stage(f"rendering {len(views_to_render)} view(s) [{mode}{cap}]")
+    t5 = time.time()
+    for index, (view, png) in enumerate(views_to_render, start=1):
+        render_png(snapshot.faces, report, png, width, height, view, mode, max_labels=max_labels)
+        if live:
+            rep.item(index, len(views_to_render), f"view {view}")
+    if live:
+        rep.end_item()
+        rep.done(f"rendered [{mode}]", time.time() - t5)
     return report

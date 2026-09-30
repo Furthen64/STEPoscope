@@ -173,7 +173,7 @@ class GeometryBuilder:
     def __init__(self, document: StepDocument):
         self.document = document
 
-    def build(self, through_order: int | None = None) -> GeometrySnapshot:
+    def build(self, through_order: int | None = None, progress=None) -> GeometrySnapshot:
         entities = self.document.entities if through_order is None else self.document.entities[: through_order + 1]
         visible = {entity.entity_id: entity for entity in entities}
         snapshot = GeometrySnapshot()
@@ -193,6 +193,12 @@ class GeometryBuilder:
                 target = next((_ref(item) for item in entity.arguments if _ref(item) is not None), None)
                 if target in snapshot.points:
                     snapshot.vertices[entity.entity_id] = snapshot.points[target]
+        # `_face_mesh` is where the real time goes on a heavy file (B-spline
+        # surfaces), so that is the loop worth counting. `progress` is None for
+        # the interactive UI and for tests, which keeps this silent.
+        reporter = progress
+        face_total = sum(1 for e in entities if e.type_name.upper() == "ADVANCED_FACE")
+        face_done = 0
         for entity in entities:
             name = entity.type_name.upper()
             if name == "EDGE_CURVE":
@@ -213,6 +219,11 @@ class GeometryBuilder:
                 mesh = self._face_mesh(entity, snapshot, visible)
                 if mesh:
                     snapshot.faces.append(mesh)
+                face_done += 1
+                if reporter is not None and reporter.enabled:
+                    reporter.item(face_done, face_total, "faces")
+        if reporter is not None and reporter.enabled:
+            reporter.end_item()
         return snapshot
 
     @staticmethod

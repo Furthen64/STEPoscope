@@ -4,6 +4,7 @@ It parses syntax and references without requiring a complete EXPRESS schema.
 Unknown entity types remain ordinary :class:`StepEntity` instances.
 """
 
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -102,6 +103,10 @@ class _Parser:
         except StepLexError as exc:
             raise StepParseError(str(exc)) from exc
         self.index = 0
+        # Newline offsets, once. span() is called once per record AND once per error
+        # site, and it used to recount newlines from offset 0 every time -- O(n) per
+        # call, O(n^2) per file. That alone was 80s of a 142s parse.
+        self._newlines = [i for i, ch in enumerate(source) if ch == "\n"]
 
     @property
     def token(self) -> Token:
@@ -203,9 +208,11 @@ class _Parser:
         return StepRecord(name, arguments, self.source[start : end_token.end], self.span(start, end_token.end))
 
     def span(self, start: int, end: int) -> SourceSpan:
-        line = self.source.count("\n", 0, start) + 1
-        line_start = self.source.rfind("\n", 0, start) + 1
-        return SourceSpan(start, end, line, start - line_start + 1)
+        # bisect over the precomputed newline offsets: same line/column as counting
+        # from offset 0, without rescanning the file for every record.
+        before = bisect_left(self._newlines, start)
+        line_start = self._newlines[before - 1] + 1 if before else 0
+        return SourceSpan(start, end, before + 1, start - line_start + 1)
 
     def parse(self) -> StepDocument:
         header: list[StepRecord] = []

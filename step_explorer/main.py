@@ -7,9 +7,11 @@ def _render_main(argv: list[str]) -> int:
     import argparse
     import glob
     import json
+    import time
     from pathlib import Path
 
     from .headless import CAMERA_DIRECTIONS, process_file
+    from .progress import Progress
 
     def views(value: str) -> tuple[str, ...]:
         requested = tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
@@ -28,6 +30,11 @@ def _render_main(argv: list[str]) -> int:
     parser.add_argument("--camera", choices=("iso", "front", "top", "right"), default="iso")
     parser.add_argument("--views", type=views, help="comma-separated views to render (iso,front,top,right); overrides --camera")
     parser.add_argument("--mode", choices=("normals", "shaded", "faces"), default="normals", help="normals colors consistent faces blue and inconsistent faces red; shaded uses neutral material; faces colors and labels each face by STEP id")
+    parser.add_argument("--quiet", action="store_true", help="suppress progress reporting on stderr")
+    parser.add_argument("--max-labels", type=int, default=0, metavar="N",
+                        help="cap faces-mode labels to the N largest faces (0 = no cap). "
+                             "Text actors dominate the render on dense files: ~35s/view for "
+                             "3500 labels versus ~5s for 400.")
     args = parser.parse_args(argv)
     paths: list[Path] = []
     for item in args.files:
@@ -38,15 +45,22 @@ def _render_main(argv: list[str]) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     reports, errors = [], []
     used: dict[str, int] = {}
-    for path in paths:
+    progress = Progress(enabled=not args.quiet)
+    total = len(paths)
+    wall = time.time()
+    progress.stage(f"{total} file(s), mode={args.mode}")
+    for index, path in enumerate(paths, start=1):
         stem = path.stem
         used[stem] = used.get(stem, 0) + 1
         name = stem if used[stem] == 1 else f"{stem}-{used[stem]}"
+        progress.end_item()
+        progress.stage(f"[{index}/{total}] {path.name}")
         try:
-            reports.append(process_file(path, args.out / name, args.width, args.height, args.camera, args.mode, args.views))
+            reports.append(process_file(path, args.out / name, args.width, args.height, args.camera, args.mode, args.views, progress=progress, max_labels=args.max_labels))
         except Exception as exc:
             errors.append({"source": str(path), "error": str(exc)})
             print(f"steposcope: {path}: {exc}", file=sys.stderr)
+    progress.note(f"total {time.time() - wall:.2f}s for {len(reports)} file(s), {len(errors)} error(s)")
     summary = {"reports": reports, "errors": errors}
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if errors:

@@ -18,6 +18,7 @@ class StepLexError(ValueError):
 
 _NUMBER = re.compile(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[Ee][+-]?\d+)?")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_REFERENCE = re.compile(r"#\d+")
 
 
 def lex(source: str) -> list[Token]:
@@ -53,12 +54,16 @@ def lex(source: str) -> list[Token]:
         if keyword is not None:
             continue
         if char == "#":
-            match = re.match(r"#\d+", source[i:])
+            # Positional match against `source`, never `re.match(..., source[i:])`:
+            # that slice copies the whole tail of the file, once per reference, so a
+            # file with many `#nnn` refs lexes in O(n^2). It cost 51s on a 143-record
+            # STEP file. Same trick as _NUMBER/_IDENTIFIER just below.
+            match = _REFERENCE.match(source, i)
             if not match:
                 raise StepLexError(f"invalid entity reference at offset {i}")
             value = match.group(0)
-            tokens.append(Token("REFERENCE", value, i, i + len(value)))
-            i += len(value)
+            tokens.append(Token("REFERENCE", value, i, match.end()))
+            i = match.end()
             continue
         if char == "'":
             start = i
